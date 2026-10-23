@@ -424,7 +424,11 @@ private struct EditorToolsPager: View {
                 .accessibilityLabel("撤销上一步")
 
                 Button {
-                    editor.recommendLook()
+                    if page == .film {
+                        editor.recommendLook()
+                    } else {
+                        editor.recommendAdjustmentsOnly()
+                    }
                 } label: {
                     Group {
                         if editor.isRecommending {
@@ -436,13 +440,13 @@ private struct EditorToolsPager: View {
                     }
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(
-                        editor.isRecommendationApplied ? GrainTheme.accent : GrainTheme.muted
+                        recommendationActive ? GrainTheme.accent : GrainTheme.muted
                     )
                     .frame(width: 28, height: 26)
                 }
                 .buttonStyle(.plain)
                 .disabled(editor.isRecommending)
-                .accessibilityLabel("推荐调色")
+                .accessibilityLabel(page == .film ? "推荐胶片" : "推荐照片参数")
 
                 Menu {
                     Button("复制调色预设", systemImage: "doc.on.doc") {
@@ -498,6 +502,12 @@ private struct EditorToolsPager: View {
                     page = horizontal < 0 ? .adjust : .film
                 }
             }
+    }
+
+    private var recommendationActive: Bool {
+        page == .film
+            ? editor.isRecommendationApplied
+            : editor.isAdjustmentRecommendationApplied
     }
 }
 

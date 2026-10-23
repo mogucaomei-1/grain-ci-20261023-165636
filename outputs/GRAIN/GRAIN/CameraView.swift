@@ -152,7 +152,6 @@ private final class CameraPreviewLookStore: @unchecked Sendable {
 final class CameraController: ObservableObject {
     let session = AVCaptureSession()
     private let photoOutput = AVCapturePhotoOutput()
-    private let stillImageOutput = AVCaptureStillImageOutput()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let sessionQueue = DispatchQueue(label: "studio.grain.camera.session")
     private let videoOutputQueue = DispatchQueue(
@@ -167,7 +166,6 @@ final class CameraController: ObservableObject {
     private var videoInput: AVCaptureDeviceInput?
     private var audioInput: AVCaptureDeviceInput?
     private var videoOutputAttached = false
-    private var stillImageOutputAttached = false
     private var photoOutputAttached = false
     private var requestedResolution: CameraResolution = .standard24
     private var activeProcessors: [Int64: CameraPhotoCaptureProcessor] = [:]
@@ -305,6 +303,7 @@ final class CameraController: ObservableObject {
 
     private func replaceVideoInput(with device: AVCaptureDevice) -> Bool {
         do {
+            promoteToHighestPhotoFormat(device)
             let newInput = try AVCaptureDeviceInput(device: device)
             session.beginConfiguration()
             if let videoInput {
@@ -390,7 +389,7 @@ final class CameraController: ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.session.beginConfiguration()
-            self.photoOutput.maxPhotoDimensions = best
+            self.updatePhotoDimensions(for: self.cameraDevice)
             self.session.commitConfiguration()
             DispatchQueue.main.async {
                 self.maxPhotoDimensions = best
@@ -413,6 +412,26 @@ final class CameraController: ObservableObject {
         if let best {
             photoOutput.maxPhotoDimensions = best
         }
+    }
+
+    private func promoteToHighestPhotoFormat(_ device: AVCaptureDevice) {
+        let best = device.formats.max { lhs, rhs in
+            maximumPhotoArea(lhs) < maximumPhotoArea(rhs)
+        }
+        guard let best, best !== device.activeFormat else { return }
+        do {
+            try device.lockForConfiguration()
+            device.activeFormat = best
+            device.unlockForConfiguration()
+        } catch {
+            // Keep the system format when another camera operation holds the lock.
+        }
+    }
+
+    private func maximumPhotoArea(_ format: AVCaptureDevice.Format) -> Int {
+        format.supportedMaxPhotoDimensions
+            .map { Int($0.width) * Int($0.height) }
+            .max() ?? 0
     }
 
     func setLivePhotoEnabled(_ enabled: Bool) async -> Bool {
@@ -449,7 +468,7 @@ final class CameraController: ObservableObject {
                     self.audioInput = nil
                 }
                 self.photoOutput.isLivePhotoCaptureEnabled =
-                    enabled && hasAudio && self.isLivePhotoSupported
+                    enabled && hasAudio && self.photoOutput.isLivePhotoCaptureSupported
                 self.session.commitConfiguration()
                 let armed = enabled && hasAudio
                 DispatchQueue.main.async {
@@ -470,6 +489,7 @@ final class CameraController: ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             do {
+                self.promoteToHighestPhotoFormat(device)
                 let newInput = try AVCaptureDeviceInput(device: device)
                 self.session.beginConfiguration()
                 if let videoInput = self.videoInput {
@@ -514,28 +534,8 @@ final class CameraController: ObservableObject {
             }
             guard generation == captureGeneration else { return }
             countdown = nil
-            sessionQueue.async { [weak self] in
-                guard let self else { return }
-                self.detachVideoOutputForCapture()
-                var isReady = self.configureCaptureOutput(
-                    usePhotoOutput: true,
-                    livePhoto: configuration.livePhoto
-                )
-                if !isReady,
-                   configuration.format != .raw,
-                   !configuration.livePhoto {
-                    isReady = self.configureCaptureOutput(
-                        usePhotoOutput: false,
-                        livePhoto: false
-                    )
-                }
-                DispatchQueue.main.async {
-                    if isReady {
-                        self.performCapture(configuration)
-                    } else {
-                        self.finishCapture(error: CameraError.cannotConfigure)
-                    }
-                }
+            DispatchQueue.main.async { [weak self] in
+                self?.performCapture(configuration)
             }
         }
     }
@@ -555,6 +555,7 @@ final class CameraController: ObservableObject {
         }
 
         do {
+            promoteToHighestPhotoFormat(device)
             let input = try AVCaptureDeviceInput(device: device)
             session.beginConfiguration()
             var didCommitConfiguration = false
@@ -582,8 +583,6 @@ final class CameraController: ObservableObject {
             session.addOutput(videoOutput)
             videoOutputAttached = true
 
-            photoOutput.isLivePhotoCaptureEnabled = false
-
             let dimensions = device.activeFormat.supportedMaxPhotoDimensions
             let initialDimensions = dimensions
                 .filter { Double($0.width) * Double($0.height) <= 24_000_000 * 1.08 }
@@ -593,25 +592,20 @@ final class CameraController: ObservableObject {
                 ?? dimensions.max {
                     Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
                 }
+            guard session.canAddOutput(photoOutput) else {
+                throw CameraError.cannotConfigure
+            }
+            session.addOutput(photoOutput)
+            photoOutputAttached = true
             if let initialDimensions {
                 photoOutput.maxPhotoDimensions = initialDimensions
             }
+            photoOutput.isLivePhotoCaptureEnabled = false
 
             cameraDevice = device
-            let liveSupported = true
+            let liveSupported = photoOutput.isLivePhotoCaptureSupported
             let rawSupported = device.position == .back
             let maxDims = initialDimensions ?? CMVideoDimensions(width: 0, height: 0)
-
-            stillImageOutput.outputSettings = [
-                AVVideoCodecKey: AVVideoCodecType.jpeg,
-                AVVideoQualityKey: 1.0
-            ]
-            stillImageOutput.isHighResolutionStillImageOutputEnabled = true
-            guard session.canAddOutput(stillImageOutput) else {
-                throw CameraError.cannotConfigure
-            }
-            session.addOutput(stillImageOutput)
-            stillImageOutputAttached = true
 
             session.commitConfiguration()
             didCommitConfiguration = true
@@ -674,11 +668,7 @@ final class CameraController: ObservableObject {
 
     private func performCapture(_ configuration: CameraCaptureConfiguration) {
         guard photoOutputAttached else {
-            if configuration.format != .raw, !configuration.livePhoto {
-                captureWithStillImageOutput(configuration)
-            } else {
-                finishCapture(error: CameraError.cannotConfigure)
-            }
+            finishCapture(error: CameraError.cannotConfigure)
             return
         }
         guard let rawFormat = photoOutput.availableRawPhotoPixelFormatTypes.first else {
@@ -694,37 +684,6 @@ final class CameraController: ObservableObject {
             captureRaw(configuration, rawFormat: rawFormat)
         } else {
             captureProcessed(configuration)
-        }
-    }
-
-    private func captureWithStillImageOutput(_ configuration: CameraCaptureConfiguration) {
-        guard let connection = stillImageOutput.connection(with: .video) else {
-            finishCapture(error: CameraError.cannotConfigure)
-            return
-        }
-        stillImageOutput.captureStillImageAsynchronously(from: connection) { [weak self] buffer, error in
-            guard let self else { return }
-            if let error {
-                DispatchQueue.main.async {
-                    self.finishCapture(error: error)
-                }
-                return
-            }
-            guard let buffer,
-                  let data = AVCaptureStillImageOutput.jpegStillImageNSDataRepresentation(buffer)
-            else {
-                DispatchQueue.main.async {
-                    self.finishCapture(error: CameraError.missingPhotoData)
-                }
-                return
-            }
-            DispatchQueue.main.async {
-                self.reattachVideoOutputAfterCapture()
-                self.processCapturedOutput(
-                    CameraCapturedOutput(data: data, livePhotoURL: nil),
-                    configuration: configuration
-                )
-            }
         }
     }
 
@@ -776,7 +735,6 @@ final class CameraController: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.activeProcessors.removeValue(forKey: id)
-                self.reattachVideoOutputAfterCapture()
                 switch result {
                 case .success(let output):
                     self.processCapturedOutput(output, configuration: configuration)
@@ -869,7 +827,6 @@ final class CameraController: ObservableObject {
     }
 
     private func finishCapture(error: Error) {
-        reattachVideoOutputAfterCapture()
         errorMessage = error.localizedDescription
         isCapturing = false
         countdown = nil
@@ -879,54 +836,6 @@ final class CameraController: ObservableObject {
         FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("mov")
-    }
-
-    private func detachVideoOutputForCapture() {
-        guard videoOutputAttached else { return }
-        session.beginConfiguration()
-        session.removeOutput(videoOutput)
-        session.commitConfiguration()
-        videoOutputAttached = false
-    }
-
-    private func configureCaptureOutput(usePhotoOutput: Bool, livePhoto: Bool) -> Bool {
-        session.beginConfiguration()
-        if usePhotoOutput {
-            if stillImageOutputAttached {
-                session.removeOutput(stillImageOutput)
-                stillImageOutputAttached = false
-            }
-            if !photoOutputAttached, session.canAddOutput(photoOutput) {
-                session.addOutput(photoOutput)
-                photoOutputAttached = true
-            }
-            photoOutput.isLivePhotoCaptureEnabled =
-                livePhoto && photoOutput.isLivePhotoCaptureSupported
-        } else {
-            photoOutput.isLivePhotoCaptureEnabled = false
-            if photoOutputAttached {
-                session.removeOutput(photoOutput)
-                photoOutputAttached = false
-            }
-            if !stillImageOutputAttached, session.canAddOutput(stillImageOutput) {
-                session.addOutput(stillImageOutput)
-                stillImageOutputAttached = true
-            }
-        }
-        session.commitConfiguration()
-        return usePhotoOutput ? photoOutputAttached : stillImageOutputAttached
-    }
-
-    private func reattachVideoOutputAfterCapture() {
-        sessionQueue.async { [weak self] in
-            guard let self, !self.videoOutputAttached else { return }
-            self.session.beginConfiguration()
-            if self.session.canAddOutput(self.videoOutput) {
-                self.session.addOutput(self.videoOutput)
-                self.videoOutputAttached = true
-            }
-            self.session.commitConfiguration()
-        }
     }
 
     private func requestMediaAccess(for mediaType: AVMediaType) async -> Bool {
@@ -1933,15 +1842,19 @@ struct CameraView: View {
                             VStack(spacing: 2) {
                                 ZStack {
                                     RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .fill(
-                                            LinearGradient(
-                                                colors: profile.uiPalette,
-                                                startPoint: .topLeading,
-                                                endPoint: .bottomTrailing
-                                            )
-                                        )
-                                    FilmCameraGlyph(palette: profile.uiPalette)
-                                        .scaleEffect(0.62)
+                                        .fill(Color(hex: 0x171714))
+                                    RadialGradient(
+                                        colors: [
+                                            profile.uiPalette[1].opacity(0.24),
+                                            .clear
+                                        ],
+                                        center: .center,
+                                        startRadius: 2,
+                                        endRadius: 34
+                                    )
+                                    FilmCameraGlyph(profile: profile)
+                                        .padding(.horizontal, 2)
+                                        .padding(.vertical, 1)
                                 }
                                 .frame(width: 56, height: 31)
                                 .overlay {

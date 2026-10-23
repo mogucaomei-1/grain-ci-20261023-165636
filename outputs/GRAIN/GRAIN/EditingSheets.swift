@@ -320,12 +320,22 @@ struct FilmOrderEditorView: View {
                 List {
                     ForEach(profiles) { profile in
                         HStack(spacing: 12) {
-                            LinearGradient(
-                                colors: profile.uiPalette,
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                            .frame(width: 42, height: 31)
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(Color(hex: 0x171714))
+                                RadialGradient(
+                                    colors: [
+                                        profile.uiPalette[1].opacity(0.24),
+                                        .clear
+                                    ],
+                                    center: .center,
+                                    startRadius: 1,
+                                    endRadius: 24
+                                )
+                                FilmCameraGlyph(profile: profile)
+                                    .padding(.horizontal, 1)
+                            }
+                            .frame(width: 46, height: 31)
                             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
 
                             VStack(alignment: .leading, spacing: 2) {

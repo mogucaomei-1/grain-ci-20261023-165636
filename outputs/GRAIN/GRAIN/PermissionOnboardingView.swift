@@ -108,6 +108,10 @@ struct PermissionOnboardingView: View {
             && photoState == .granted
     }
 
+    private var successColor: Color {
+        Color(hex: 0x75B68A)
+    }
+
     private func permissionRow(
         icon: String,
         title: String,
@@ -118,7 +122,7 @@ struct PermissionOnboardingView: View {
         HStack(spacing: 13) {
             Image(systemName: icon)
                 .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(GrainTheme.accent)
+                .foregroundStyle(state == .granted ? successColor : GrainTheme.accent)
                 .frame(width: 30)
 
             VStack(alignment: .leading, spacing: 3) {
@@ -140,15 +144,21 @@ struct PermissionOnboardingView: View {
                     case .requesting:
                         ProgressView().controlSize(.mini)
                     case .granted:
-                        Image(systemName: "checkmark")
+                        HStack(spacing: 3) {
+                            Image(systemName: "checkmark")
+                            Text("已开启")
+                        }
                     case .denied:
                         Text("去设置")
                     }
                 }
                 .font(.system(size: 10, weight: .bold, design: .rounded))
-                .foregroundStyle(state == .granted ? GrainTheme.black : GrainTheme.paper)
-                .frame(width: 62, height: 32)
-                .background(state == .granted ? GrainTheme.paper : GrainTheme.raised, in: Capsule())
+                .foregroundStyle(state == .granted ? successColor : GrainTheme.paper)
+                .frame(width: 72, height: 32)
+                .background(
+                    state == .granted ? successColor.opacity(0.14) : GrainTheme.raised,
+                    in: Capsule()
+                )
             }
             .buttonStyle(.plain)
             .disabled(state == .requesting || state == .granted)

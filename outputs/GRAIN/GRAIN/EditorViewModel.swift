@@ -15,6 +15,7 @@ final class EditorViewModel: ObservableObject {
     @Published private(set) var isPreparing = false
     @Published private(set) var isRecommending = false
     @Published private(set) var isRecommendationApplied = false
+    @Published private(set) var isAdjustmentRecommendationApplied = false
     @Published private(set) var canUndo = false
     @Published private(set) var isExporting = false
     @Published var selectedProfile: FilmProfile = .portra
@@ -36,6 +37,7 @@ final class EditorViewModel: ObservableObject {
     private var previewGeneration = 0
     private var undoStack: [EditorSnapshot] = []
     private var recommendationBaseline: EditorSnapshot?
+    private var adjustmentRecommendationBaseline: AdjustmentRecommendationBaseline?
 
     var canExport: Bool {
         photo != nil && !isPreparing && !isExporting
@@ -44,11 +46,13 @@ final class EditorViewModel: ObservableObject {
     func selectProfile(_ profile: FilmProfile) {
         recordUndoSnapshot()
         recommendationBaseline = nil
+        adjustmentRecommendationBaseline = nil
         withAnimation(.snappy(duration: 0.25)) {
             selectedProfile = profile
             settings = profile.factorySettings
             intensity = profile == .neutral ? 1 : 0.82
             isRecommendationApplied = false
+            isAdjustmentRecommendationApplied = false
         }
         schedulePreview()
     }
@@ -73,18 +77,22 @@ final class EditorViewModel: ObservableObject {
         isPreparing = false
         isExporting = false
         isRecommendationApplied = false
+        isAdjustmentRecommendationApplied = false
         undoStack.removeAll()
         recommendationBaseline = nil
+        adjustmentRecommendationBaseline = nil
         canUndo = false
     }
 
     func resetSelectedProfile() {
         recordUndoSnapshot()
         recommendationBaseline = nil
+        adjustmentRecommendationBaseline = nil
         withAnimation(.snappy(duration: 0.25)) {
             settings = selectedProfile.factorySettings
             intensity = selectedProfile == .neutral ? 1 : 0.82
             isRecommendationApplied = false
+            isAdjustmentRecommendationApplied = false
         }
         schedulePreview()
     }
@@ -92,11 +100,13 @@ final class EditorViewModel: ObservableObject {
     func resetAllAdjustments() {
         recordUndoSnapshot()
         recommendationBaseline = nil
+        adjustmentRecommendationBaseline = nil
         withAnimation(.snappy(duration: 0.25)) {
             selectedProfile = .neutral
             settings = FilmProfile.neutral.factorySettings
             intensity = 1
             isRecommendationApplied = false
+            isAdjustmentRecommendationApplied = false
         }
         schedulePreview()
     }
@@ -108,6 +118,7 @@ final class EditorViewModel: ObservableObject {
         }
         guard let originalPreview, !isRecommending else { return }
         recommendationBaseline = currentSnapshot
+        adjustmentRecommendationBaseline = nil
         recordUndoSnapshot()
         isRecommending = true
 
@@ -121,9 +132,80 @@ final class EditorViewModel: ObservableObject {
                 settings = recommendation.settings
                 intensity = recommendation.intensity
                 isRecommendationApplied = true
+                isAdjustmentRecommendationApplied = false
             }
             schedulePreview()
             isRecommending = false
+        }
+    }
+
+    func recommendAdjustmentsOnly() {
+        if isAdjustmentRecommendationApplied {
+            cancelAdjustmentRecommendation()
+            return
+        }
+        guard let originalPreview, !isRecommending else { return }
+        let profile = selectedProfile
+        let baselineSettings = settings
+        let baselineIntensity = intensity
+        adjustmentRecommendationBaseline = AdjustmentRecommendationBaseline(
+            settings: baselineSettings,
+            intensity: baselineIntensity
+        )
+        recommendationBaseline = nil
+        recordUndoSnapshot()
+        isRecommending = true
+
+        Task {
+            let recommendation = await Task.detached(priority: .userInitiated) {
+                LocalLookAdvisor.recommend(from: originalPreview)
+            }.value
+            guard selectedProfile == profile else {
+                isRecommending = false
+                return
+            }
+
+            var adjusted = profile.factorySettings
+            let reference = recommendation.profile.factorySettings
+            adjusted.exposure = (adjusted.exposure + recommendation.settings.exposure - reference.exposure)
+                .clamped(to: -2...2)
+            adjusted.temperature = (adjusted.temperature + recommendation.settings.temperature - reference.temperature)
+                .clamped(to: 3500...9000)
+            adjusted.tint = (adjusted.tint + recommendation.settings.tint - reference.tint)
+                .clamped(to: -100...100)
+            adjusted.highlights = (adjusted.highlights + recommendation.settings.highlights - reference.highlights)
+                .clamped(to: -100...100)
+            adjusted.shadows = (adjusted.shadows + recommendation.settings.shadows - reference.shadows)
+                .clamped(to: -100...100)
+            adjusted.whites = (adjusted.whites + recommendation.settings.whites - reference.whites)
+                .clamped(to: -100...100)
+            adjusted.blacks = (adjusted.blacks + recommendation.settings.blacks - reference.blacks)
+                .clamped(to: -100...100)
+            adjusted.contrast = (adjusted.contrast + recommendation.settings.contrast - reference.contrast)
+                .clamped(to: -100...100)
+            adjusted.vibrance = (adjusted.vibrance + recommendation.settings.vibrance - reference.vibrance)
+                .clamped(to: -100...100)
+            adjusted.saturation = (adjusted.saturation + recommendation.settings.saturation - reference.saturation)
+                .clamped(to: -100...100)
+            adjusted.clarity = (adjusted.clarity + recommendation.settings.clarity - reference.clarity)
+                .clamped(to: -100...100)
+            adjusted.sharpness = (adjusted.sharpness + recommendation.settings.sharpness - reference.sharpness)
+                .clamped(to: 0...100)
+            adjusted.fade = (adjusted.fade + recommendation.settings.fade - reference.fade)
+                .clamped(to: 0...100)
+            adjusted.grain = (adjusted.grain + recommendation.settings.grain - reference.grain)
+                .clamped(to: 0...100)
+            adjusted.vignette = (adjusted.vignette + recommendation.settings.vignette - reference.vignette)
+                .clamped(to: 0...100)
+
+            withAnimation(.snappy(duration: 0.24)) {
+                settings = adjusted
+                isRecommendationApplied = false
+                isAdjustmentRecommendationApplied = true
+            }
+            schedulePreview()
+            isRecommending = false
+            showNotice("已按画面参数调整 · \(recommendation.reason)")
         }
     }
 
@@ -159,11 +241,13 @@ final class EditorViewModel: ObservableObject {
 
         recordUndoSnapshot()
         recommendationBaseline = nil
+        adjustmentRecommendationBaseline = nil
         withAnimation(.snappy(duration: 0.24)) {
             selectedProfile = preset.profile
             settings = preset.settings
             intensity = preset.intensity
             isRecommendationApplied = false
+            isAdjustmentRecommendationApplied = false
         }
         schedulePreview()
         showNotice("已粘贴预设 · \(preset.profile.name)")
@@ -175,6 +259,8 @@ final class EditorViewModel: ObservableObject {
         crop = newCrop
         isRecommendationApplied = false
         recommendationBaseline = nil
+        isAdjustmentRecommendationApplied = false
+        adjustmentRecommendationBaseline = nil
         schedulePreview()
     }
 
@@ -209,6 +295,8 @@ final class EditorViewModel: ObservableObject {
         recordUndoSnapshot()
         mosaicStrokes.append(stroke)
         isRecommendationApplied = false
+        isAdjustmentRecommendationApplied = false
+        adjustmentRecommendationBaseline = nil
         schedulePreview()
     }
 
@@ -222,6 +310,8 @@ final class EditorViewModel: ObservableObject {
     func markManualAdjustment() {
         isRecommendationApplied = false
         recommendationBaseline = nil
+        isAdjustmentRecommendationApplied = false
+        adjustmentRecommendationBaseline = nil
     }
 
     func recordUndoSnapshot() {
@@ -247,6 +337,8 @@ final class EditorViewModel: ObservableObject {
         }
         canUndo = !undoStack.isEmpty
         recommendationBaseline = nil
+        isAdjustmentRecommendationApplied = false
+        adjustmentRecommendationBaseline = nil
         schedulePreview()
     }
 
@@ -349,8 +441,10 @@ final class EditorViewModel: ObservableObject {
             exportOptions.keepLocation = asset.hasLocation
             undoStack.removeAll()
             recommendationBaseline = nil
+            adjustmentRecommendationBaseline = nil
             canUndo = false
             isRecommendationApplied = false
+            isAdjustmentRecommendationApplied = false
             isPreparing = false
             schedulePreview()
 
@@ -522,6 +616,25 @@ final class EditorViewModel: ObservableObject {
         self.recommendationBaseline = nil
         schedulePreview()
     }
+
+    private func cancelAdjustmentRecommendation() {
+        guard let baseline = adjustmentRecommendationBaseline else {
+            isAdjustmentRecommendationApplied = false
+            return
+        }
+        withAnimation(.snappy(duration: 0.24)) {
+            settings = baseline.settings
+            intensity = baseline.intensity
+            isAdjustmentRecommendationApplied = false
+        }
+        adjustmentRecommendationBaseline = nil
+        schedulePreview()
+    }
+}
+
+private struct AdjustmentRecommendationBaseline {
+    let settings: FilmSettings
+    let intensity: Double
 }
 
 private struct EditorSnapshot: Equatable {
