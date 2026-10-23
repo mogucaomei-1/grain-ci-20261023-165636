@@ -165,9 +165,9 @@ final class CameraController: ObservableObject {
     private var cameraDevice: AVCaptureDevice?
     private var videoInput: AVCaptureDeviceInput?
     private var audioInput: AVCaptureDeviceInput?
+    private var videoOutputAttached = false
     private var activeProcessors: [Int64: CameraPhotoCaptureProcessor] = [:]
     private var captureGeneration = 0
-    private var microphoneAllowed = false
 
     @Published private(set) var isReady = false
     @Published private(set) var isCapturing = false
@@ -175,6 +175,7 @@ final class CameraController: ObservableObject {
     @Published private(set) var notice: String?
     @Published private(set) var errorMessage: String?
     @Published private(set) var isLivePhotoSupported = false
+    @Published private(set) var isLivePhotoArmed = false
     @Published private(set) var isRawSupported = false
     @Published private(set) var maxPhotoDimensions = CMVideoDimensions(width: 0, height: 0)
     @Published private(set) var minimumZoom: CGFloat = 1
@@ -191,8 +192,6 @@ final class CameraController: ObservableObject {
             errorMessage = "请在系统设置中允许 GRAIN 使用相机。"
             return
         }
-        microphoneAllowed = await requestMediaAccess(for: .audio)
-
         sessionQueue.async { [weak self] in
             self?.configureSession()
         }
@@ -360,6 +359,47 @@ final class CameraController: ObservableObject {
         }
     }
 
+    func setLivePhotoEnabled(_ enabled: Bool) async -> Bool {
+        guard isLivePhotoSupported else { return false }
+        if enabled {
+            let allowed = await requestMediaAccess(for: .audio)
+            guard allowed else {
+                errorMessage = "请在系统设置中允许麦克风权限后再使用实况照片。"
+                return false
+            }
+        }
+
+        return await withCheckedContinuation { continuation in
+            sessionQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                self.session.beginConfiguration()
+                if enabled {
+                    if let microphone = AVCaptureDevice.default(for: .audio),
+                       let input = try? AVCaptureDeviceInput(device: microphone),
+                       self.audioInput == nil,
+                       self.session.canAddInput(input) {
+                        self.session.addInput(input)
+                        self.audioInput = input
+                    }
+                } else if let audioInput = self.audioInput {
+                    self.session.removeInput(audioInput)
+                    self.audioInput = nil
+                }
+                self.photoOutput.isLivePhotoCaptureEnabled =
+                    enabled && self.photoOutput.isLivePhotoCaptureSupported
+                self.session.commitConfiguration()
+                let armed = enabled && self.photoOutput.isLivePhotoCaptureEnabled
+                DispatchQueue.main.async {
+                    self.isLivePhotoArmed = armed
+                    continuation.resume(returning: armed)
+                }
+            }
+        }
+    }
+
     func toggleCamera() {
         let targetPosition: AVCaptureDevice.Position = isUsingFrontCamera ? .back : .front
         guard let device = discoverCamera(position: targetPosition) else {
@@ -414,7 +454,13 @@ final class CameraController: ObservableObject {
             }
             guard generation == captureGeneration else { return }
             countdown = nil
-            performCapture(configuration)
+            sessionQueue.async { [weak self] in
+                guard let self else { return }
+                self.detachVideoOutputForCapture()
+                DispatchQueue.main.async {
+                    self.performCapture(configuration)
+                }
+            }
         }
     }
 
@@ -449,16 +495,6 @@ final class CameraController: ObservableObject {
             session.addInput(input)
             videoInput = input
 
-            var hasAudioInput = false
-            if microphoneAllowed,
-               let microphone = AVCaptureDevice.default(for: .audio),
-               let audioInput = try? AVCaptureDeviceInput(device: microphone),
-               session.canAddInput(audioInput) {
-                session.addInput(audioInput)
-                self.audioInput = audioInput
-                hasAudioInput = true
-            }
-
             guard session.canAddOutput(photoOutput) else {
                 throw CameraError.cannotConfigure
             }
@@ -471,9 +507,9 @@ final class CameraController: ObservableObject {
                 throw CameraError.cannotConfigure
             }
             session.addOutput(videoOutput)
+            videoOutputAttached = true
             session.addOutput(photoOutput)
-            photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported
-                && hasAudioInput
+            photoOutput.isLivePhotoCaptureEnabled = false
 
             let dimensions = device.activeFormat.supportedMaxPhotoDimensions
             let initialDimensions = dimensions
@@ -489,7 +525,7 @@ final class CameraController: ObservableObject {
             }
 
             cameraDevice = device
-            let liveSupported = photoOutput.isLivePhotoCaptureEnabled
+            let liveSupported = photoOutput.isLivePhotoCaptureSupported
             let rawSupported = !photoOutput.availableRawPhotoPixelFormatTypes.isEmpty
             let maxDims = initialDimensions ?? CMVideoDimensions(width: 0, height: 0)
 
@@ -631,6 +667,7 @@ final class CameraController: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.activeProcessors.removeValue(forKey: id)
+                self.reattachVideoOutputAfterCapture()
                 switch result {
                 case .success(let output):
                     self.processCapturedOutput(output, configuration: configuration)
@@ -720,6 +757,7 @@ final class CameraController: ObservableObject {
     }
 
     private func finishCapture(error: Error) {
+        reattachVideoOutputAfterCapture()
         errorMessage = error.localizedDescription
         isCapturing = false
         countdown = nil
@@ -729,6 +767,26 @@ final class CameraController: ObservableObject {
         FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("mov")
+    }
+
+    private func detachVideoOutputForCapture() {
+        guard videoOutputAttached else { return }
+        session.beginConfiguration()
+        session.removeOutput(videoOutput)
+        session.commitConfiguration()
+        videoOutputAttached = false
+    }
+
+    private func reattachVideoOutputAfterCapture() {
+        sessionQueue.async { [weak self] in
+            guard let self, !self.videoOutputAttached else { return }
+            self.session.beginConfiguration()
+            if self.session.canAddOutput(self.videoOutput) {
+                self.session.addOutput(self.videoOutput)
+                self.videoOutputAttached = true
+            }
+            self.session.commitConfiguration()
+        }
     }
 
     private func requestMediaAccess(for mediaType: AVMediaType) async -> Bool {
@@ -1289,6 +1347,7 @@ struct CameraView: View {
     @State private var cameraIntensity = 1.0
     @State private var didSwipeBack = false
     @State private var showCameraFilters = false
+    @State private var isPreparingLivePhoto = false
 
     private let zoomOptions: [CGFloat] = [0.5, 1, 2, 4, 8]
 
@@ -1378,6 +1437,9 @@ struct CameraView: View {
         .onChange(of: format) { _, newValue in
             if newValue == .raw {
                 livePhoto = false
+                Task {
+                    _ = await camera.setLivePhotoEnabled(false)
+                }
             }
         }
         .onChange(of: cameraProfile) { _, _ in
@@ -1428,16 +1490,32 @@ struct CameraView: View {
             .buttonStyle(.plain)
 
             Button {
-                livePhoto.toggle()
+                guard !isPreparingLivePhoto else { return }
+                isPreparingLivePhoto = true
+                Task {
+                    let enabled = await camera.setLivePhotoEnabled(!livePhoto)
+                    livePhoto = enabled
+                    isPreparingLivePhoto = false
+                    if enabled {
+                        GrainHaptics.lightImpact(enabled: true)
+                    }
+                }
             } label: {
-                Image(systemName: livePhoto ? "livephoto" : "livephoto.slash")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(livePhoto ? GrainTheme.accent : GrainTheme.paper.opacity(0.62))
-                    .frame(width: 38, height: 38)
-                    .background(Color.black.opacity(0.58), in: Circle())
+                Group {
+                    if isPreparingLivePhoto {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else {
+                        Image(systemName: livePhoto ? "livephoto" : "livephoto.slash")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                }
+                .foregroundStyle(livePhoto ? GrainTheme.accent : GrainTheme.paper.opacity(0.62))
+                .frame(width: 38, height: 38)
+                .background(Color.black.opacity(0.58), in: Circle())
             }
             .buttonStyle(.plain)
-            .disabled(!camera.isLivePhotoSupported || format == .raw)
+            .disabled(!camera.isLivePhotoSupported || format == .raw || isPreparingLivePhoto)
 
             Button {
                 showGrid.toggle()
