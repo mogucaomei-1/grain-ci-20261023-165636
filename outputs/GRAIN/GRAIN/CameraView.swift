@@ -164,6 +164,7 @@ final class CameraController: ObservableObject {
     )
     private var cameraDevice: AVCaptureDevice?
     private var videoInput: AVCaptureDeviceInput?
+    private var audioInput: AVCaptureDeviceInput?
     private var activeProcessors: [Int64: CameraPhotoCaptureProcessor] = [:]
     private var captureGeneration = 0
     private var microphoneAllowed = false
@@ -424,11 +425,14 @@ final class CameraController: ObservableObject {
             session.addInput(input)
             videoInput = input
 
+            var hasAudioInput = false
             if microphoneAllowed,
                let microphone = AVCaptureDevice.default(for: .audio),
                let audioInput = try? AVCaptureDeviceInput(device: microphone),
                session.canAddInput(audioInput) {
                 session.addInput(audioInput)
+                self.audioInput = audioInput
+                hasAudioInput = true
             }
 
             guard session.canAddOutput(photoOutput) else {
@@ -445,6 +449,7 @@ final class CameraController: ObservableObject {
             session.addOutput(videoOutput)
             session.addOutput(photoOutput)
             photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported
+                && hasAudioInput
 
             let dimensions = device.activeFormat.supportedMaxPhotoDimensions
             let maximumDimensions = dimensions.max {
@@ -455,7 +460,7 @@ final class CameraController: ObservableObject {
             }
 
             cameraDevice = device
-            let liveSupported = photoOutput.isLivePhotoCaptureSupported
+            let liveSupported = photoOutput.isLivePhotoCaptureEnabled
             let rawSupported = !photoOutput.availableRawPhotoPixelFormatTypes.isEmpty
             let maxDims = maximumDimensions ?? CMVideoDimensions(width: 0, height: 0)
 
@@ -687,6 +692,7 @@ final class CameraController: ObservableObject {
                 if let livePhotoURL = output.livePhotoURL {
                     let videoOptions = PHAssetResourceCreationOptions()
                     videoOptions.originalFilename = output.fileName
+                        .replacingOccurrences(of: ".heic", with: ".mov")
                         .replacingOccurrences(of: ".heif", with: ".mov")
                         .replacingOccurrences(of: ".png", with: ".mov")
                     request.addResource(
@@ -916,7 +922,7 @@ private enum CameraImageProcessor {
                 throw CameraError.imageEncodeFailed
             }
 
-            let fileExtension = format == .png ? "png" : "heif"
+            let fileExtension = format == .png ? "png" : "heic"
             return CameraPreparedOutput(
                 data: data as Data,
                 fileName: "GRAIN-\(timestamp()).\(fileExtension)",
@@ -1200,6 +1206,8 @@ private final class CameraVideoPreviewDelegate: NSObject, AVCaptureVideoDataOutp
 
     weak var previewView: CameraPreviewUIView?
     private let lookStore: CameraPreviewLookStore
+    private var lastFrameTime: CFTimeInterval = 0
+    private var frameDeliveryPending = false
 
     init(lookStore: CameraPreviewLookStore) {
         self.lookStore = lookStore
@@ -1210,7 +1218,19 @@ private final class CameraVideoPreviewDelegate: NSObject, AVCaptureVideoDataOutp
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let now = CACurrentMediaTime()
+        guard !frameDeliveryPending, now - lastFrameTime >= 1.0 / 24.0 else {
+            return
+        }
+        lastFrameTime = now
+        frameDeliveryPending = true
+
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            DispatchQueue.main.async { [weak self] in
+                self?.frameDeliveryPending = false
+            }
+            return
+        }
 
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
@@ -1233,12 +1253,16 @@ private final class CameraVideoPreviewDelegate: NSObject, AVCaptureVideoDataOutp
             filtered,
             from: filtered.extent.integral
         ) else {
+            DispatchQueue.main.async { [weak self] in
+                self?.frameDeliveryPending = false
+            }
             return
         }
 
         let uiImage = UIImage(cgImage: image)
         DispatchQueue.main.async { [weak self] in
             self?.previewView?.updatePreview(uiImage)
+            self?.frameDeliveryPending = false
         }
     }
 }
