@@ -6,6 +6,8 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var photoLibrary = PhotoLibraryViewModel()
     @AppStorage("showHistogram") private var showHistogram = true
+    @AppStorage("showCameraButton") private var showCameraButton = true
+    @AppStorage("showFileImportButton") private var showFileImportButton = true
     @State private var showDocumentPicker = false
     @State private var showExportSheet = false
     @State private var showInfoSheet = false
@@ -22,8 +24,8 @@ struct RootView: View {
                 VStack(spacing: 0) {
                     MinimalTopBar(
                         hasPhoto: false,
-                        onCamera: { showCamera = true },
-                        onFiles: { showDocumentPicker = true },
+                        onCamera: showCameraButton ? { showCamera = true } : nil,
+                        onFiles: showFileImportButton ? { showDocumentPicker = true } : nil,
                         onInfo: { showInfoSheet = true },
                         onSettings: { showSettings = true },
                         histogramVisible: showHistogram,
@@ -92,7 +94,7 @@ struct RootView: View {
         }
         .sheet(isPresented: $showSettings) {
             AppSettingsView()
-                .presentationDetents([.height(390)])
+                .presentationDetents([.height(610)])
                 .presentationDragIndicator(.visible)
         }
         .fullScreenCover(isPresented: $showCamera) {
@@ -198,7 +200,7 @@ struct RootView: View {
 private struct MinimalTopBar: View {
     let hasPhoto: Bool
     let onCamera: (() -> Void)?
-    let onFiles: () -> Void
+    let onFiles: (() -> Void)?
     let onInfo: () -> Void
     let onSettings: () -> Void
     let histogramVisible: Bool
@@ -236,14 +238,16 @@ private struct MinimalTopBar: View {
                 .accessibilityLabel("打开相机")
             }
 
-            Button(action: onFiles) {
-                Image(systemName: "folder")
-                    .font(.system(size: 14, weight: .medium))
-                    .frame(width: 38, height: 38)
-                    .background(GrainTheme.raised, in: Circle())
+            if let onFiles {
+                Button(action: onFiles) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 14, weight: .medium))
+                        .frame(width: 38, height: 38)
+                        .background(GrainTheme.raised, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("从文件导入")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("从文件导入")
 
             if let onToggleHistogram {
                 Button(action: onToggleHistogram) {

@@ -379,6 +379,8 @@ struct AppSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("hapticsEnabled") private var hapticsEnabled = true
     @AppStorage("showHistogram") private var showHistogram = true
+    @AppStorage("showCameraButton") private var showCameraButton = true
+    @AppStorage("showFileImportButton") private var showFileImportButton = true
 
     var body: some View {
         ZStack {
@@ -445,6 +447,54 @@ struct AppSettingsView: View {
                     }
                     Spacer()
                     Toggle("", isOn: $showHistogram)
+                        .labelsHidden()
+                        .tint(GrainTheme.accent)
+                }
+                .padding(16)
+                .background(GrainTheme.surface, in: RoundedRectangle(cornerRadius: 17))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 17)
+                        .stroke(GrainTheme.line, lineWidth: 0.8)
+                }
+
+                HStack(spacing: 12) {
+                    Image(systemName: "camera.fill")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(GrainTheme.accent)
+                        .frame(width: 28)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("主页相机入口")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        Text("立即同步到主页右上角功能区")
+                            .font(.system(size: 9, design: .rounded))
+                            .foregroundStyle(GrainTheme.muted)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $showCameraButton)
+                        .labelsHidden()
+                        .tint(GrainTheme.accent)
+                }
+                .padding(16)
+                .background(GrainTheme.surface, in: RoundedRectangle(cornerRadius: 17))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 17)
+                        .stroke(GrainTheme.line, lineWidth: 0.8)
+                }
+
+                HStack(spacing: 12) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(GrainTheme.accent)
+                        .frame(width: 28)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("主页文件导入")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        Text("控制主页右上角的文件导入入口")
+                            .font(.system(size: 9, design: .rounded))
+                            .foregroundStyle(GrainTheme.muted)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $showFileImportButton)
                         .labelsHidden()
                         .tint(GrainTheme.accent)
                 }

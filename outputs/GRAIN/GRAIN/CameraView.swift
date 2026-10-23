@@ -847,10 +847,6 @@ private final class CameraPhotoCaptureProcessor: NSObject, AVCapturePhotoCapture
 }
 
 private enum CameraImageProcessor {
-    private static let context = CIContext(options: [
-        .cacheIntermediates: false
-    ])
-
     static func prepare(
         output: CameraCapturedOutput,
         configuration: CameraCaptureConfiguration
@@ -865,24 +861,44 @@ private enum CameraImageProcessor {
                 )
             }
 
-            guard let source = CIImage(
-                data: output.data,
-                options: [.applyOrientationProperty: true]
-            ) else {
+            guard let source = CGImageSourceCreateWithData(
+                output.data as CFData,
+                nil
+            ),
+            let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                as? [CFString: Any]
+            else {
                 throw CameraError.imageDecodeFailed
             }
 
-            let cropped = crop(source, to: configuration.aspect.ratio)
-            let scaled = resize(cropped, targetPixels: configuration.resolution.targetPixels)
-            let extent = scaled.extent.integral
-            guard let image = context.createCGImage(
-                scaled,
-                from: extent,
-                format: .RGBA8,
-                colorSpace: CGColorSpace(name: CGColorSpace.displayP3)
+            let sourceWidth = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue ?? 0
+            let sourceHeight = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue ?? 0
+            let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+            let isRotated = [5, 6, 7, 8].contains(orientation)
+            let orientedWidth = isRotated ? sourceHeight : sourceWidth
+            let orientedHeight = isRotated ? sourceWidth : sourceHeight
+            let currentRatio = orientedWidth / max(orientedHeight, 1)
+            let targetRatio = configuration.aspect.ratio
+            let targetPixels = configuration.resolution.targetPixels
+            let neededLongEdge = currentRatio > targetRatio
+                ? sqrt(targetPixels / targetRatio)
+                : sqrt(targetPixels * targetRatio)
+            let sourceLongEdge = max(sourceWidth, sourceHeight)
+            let maxPixelSize = Int(min(sourceLongEdge, ceil(neededLongEdge)).rounded())
+
+            let thumbnailOptions: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize)
+            ]
+            guard let decoded = CGImageSourceCreateThumbnailAtIndex(
+                source,
+                0,
+                thumbnailOptions as CFDictionary
             ) else {
-                throw CameraError.imageEncodeFailed
+                throw CameraError.imageDecodeFailed
             }
+            let image = crop(decoded, to: targetRatio)
 
             let format: CameraCaptureFormat = configuration.format == .png ? .png : .heif
             let type = format == .png ? UTType.png : UTType.heic
@@ -910,44 +926,30 @@ private enum CameraImageProcessor {
         }
     }
 
-    private static func crop(_ image: CIImage, to ratio: Double) -> CIImage {
-        let extent = image.extent.integral
-        let currentRatio = extent.width / max(extent.height, 1)
+    private static func crop(_ image: CGImage, to ratio: Double) -> CGImage {
+        let width = CGFloat(image.width)
+        let height = CGFloat(image.height)
+        let currentRatio = width / max(height, 1)
         let targetRatio = CGFloat(ratio)
         let cropRect: CGRect
         if currentRatio > targetRatio {
-            let width = extent.height * targetRatio
+            let targetWidth = height * targetRatio
             cropRect = CGRect(
-                x: extent.midX - width / 2,
-                y: extent.minY,
-                width: width,
-                height: extent.height
-            )
-        } else {
-            let height = extent.width / targetRatio
-            cropRect = CGRect(
-                x: extent.minX,
-                y: extent.midY - height / 2,
-                width: extent.width,
+                x: (width - targetWidth) / 2,
+                y: 0,
+                width: targetWidth,
                 height: height
             )
-        }
-        return image.cropped(to: cropRect.integral)
-    }
-
-    private static func resize(_ image: CIImage, targetPixels: Double) -> CIImage {
-        let extent = image.extent
-        let currentPixels = Double(extent.width * extent.height)
-        guard currentPixels > targetPixels, currentPixels > 0 else { return image }
-        let scale = sqrt(targetPixels / currentPixels)
-        return image
-            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            .transformed(
-                by: CGAffineTransform(
-                    translationX: -image.extent.minX * scale,
-                    y: -image.extent.minY * scale
-                )
+        } else {
+            let targetHeight = width / targetRatio
+            cropRect = CGRect(
+                x: 0,
+                y: (height - targetHeight) / 2,
+                width: width,
+                height: targetHeight
             )
+        }
+        return image.cropping(to: cropRect.integral) ?? image
     }
 
     private static func timestamp() -> String {
@@ -1284,6 +1286,7 @@ struct CameraView: View {
 
                 cameraControls
             }
+            .ignoresSafeArea(.container, edges: .bottom)
 
             if let countdown = camera.countdown {
                 Text("\(countdown)")
@@ -1438,7 +1441,7 @@ struct CameraView: View {
     }
 
     private var cameraControls: some View {
-        VStack(spacing: 9) {
+        VStack(spacing: 7) {
             if showCameraFilters {
                 cameraFilterTray
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -1594,14 +1597,14 @@ struct CameraView: View {
         }
         .padding(.horizontal, 14)
         .padding(.top, 16)
-        .padding(.bottom, 10)
+        .padding(.bottom, 18)
         .background(Color.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 28))
         .overlay {
             RoundedRectangle(cornerRadius: 28)
                 .stroke(Color.white.opacity(0.10), lineWidth: 0.8)
         }
         .padding(.horizontal, 12)
-        .padding(.bottom, 8)
+        .padding(.bottom, 0)
     }
 
     private var cameraFilterTray: some View {
