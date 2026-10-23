@@ -1237,25 +1237,18 @@ private struct AdjustPanel: View {
             }
 
             HStack(spacing: 12) {
-                Slider(
+                ResetValueSlider(
                     value: activeBinding,
-                    in: activeRange,
-                    onEditingChanged: { editing in
-                        if editing {
-                            editor.recordUndoSnapshot()
-                            lastHapticValue = value(for: selectedTool)
-                            GrainHaptics.prepare()
-                        }
+                    range: activeRange,
+                    onEditStart: {
+                        editor.recordUndoSnapshot()
+                        lastHapticValue = value(for: selectedTool)
+                        GrainHaptics.prepare()
+                    },
+                    onReset: {
+                        resetSelectedToolToDefault()
                     }
                 )
-                    .tint(GrainTheme.accent)
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(
-                        TapGesture(count: 2)
-                            .onEnded {
-                                resetSelectedToolToDefault()
-                            }
-                    )
 
                 Text(activeValueText)
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
@@ -1401,6 +1394,69 @@ private struct AdjustPanel: View {
         case .grain: return defaults.grain
         case .vignette: return defaults.vignette
         }
+    }
+}
+
+private struct ResetValueSlider: View {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let onEditStart: () -> Void
+    let onReset: () -> Void
+    @State private var isEditing = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(proxy.size.width, 1)
+            let inset: CGFloat = 10
+            let usableWidth = max(width - inset * 2, 1)
+            let progress = min(max((value - range.lowerBound) / max(range.upperBound - range.lowerBound, 0.0001), 0), 1)
+            let knobX = inset + usableWidth * CGFloat(progress)
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.14))
+                    .frame(height: 4)
+
+                Capsule()
+                    .fill(GrainTheme.accent)
+                    .frame(width: knobX, height: 4)
+
+                Circle()
+                    .fill(GrainTheme.paper)
+                    .frame(width: 19, height: 19)
+                    .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
+                    .offset(x: knobX - 9.5)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                    .onChanged { gesture in
+                        if !isEditing {
+                            isEditing = true
+                            onEditStart()
+                        }
+                        let position = min(max(gesture.location.x - inset, 0), usableWidth)
+                        value = range.lowerBound
+                            + Double(position / usableWidth) * (range.upperBound - range.lowerBound)
+                    }
+                    .onEnded { _ in
+                        isEditing = false
+                    }
+            )
+            .simultaneousGesture(
+                SpatialTapGesture(count: 2, coordinateSpace: .local)
+                    .onEnded { gesture in
+                        if abs(gesture.location.x - knobX) <= 22 {
+                            onReset()
+                        }
+                    }
+            )
+        }
+        .frame(height: 31)
+        .accessibilityElement()
+        .accessibilityLabel("调整滑杆")
+        .accessibilityHint("双击白色旋钮恢复当前参数默认值")
     }
 }
 

@@ -188,6 +188,7 @@ final class CameraController: ObservableObject {
     @Published private(set) var minimumExposureBias: Float = -2
     @Published private(set) var maximumExposureBias: Float = 2
     @Published private(set) var isUsingFrontCamera = false
+    @Published private(set) var latestCaptureThumbnail: UIImage?
 
     func start() async {
         let cameraAllowed = await requestMediaAccess(for: .video)
@@ -460,11 +461,18 @@ final class CameraController: ObservableObject {
             sessionQueue.async { [weak self] in
                 guard let self else { return }
                 self.detachVideoOutputForCapture()
-                let needsPhotoOutput = configuration.format == .raw || configuration.livePhoto
-                let isReady = self.configureCaptureOutput(
-                    usePhotoOutput: needsPhotoOutput,
+                var isReady = self.configureCaptureOutput(
+                    usePhotoOutput: true,
                     livePhoto: configuration.livePhoto
                 )
+                if !isReady,
+                   configuration.format != .raw,
+                   !configuration.livePhoto {
+                    isReady = self.configureCaptureOutput(
+                        usePhotoOutput: false,
+                        livePhoto: false
+                    )
+                }
                 DispatchQueue.main.async {
                     if isReady {
                         self.performCapture(configuration)
@@ -631,8 +639,12 @@ final class CameraController: ObservableObject {
     }
 
     private func performCapture(_ configuration: CameraCaptureConfiguration) {
-        if configuration.format != .raw, !configuration.livePhoto {
-            captureWithStillImageOutput(configuration)
+        guard photoOutputAttached else {
+            if configuration.format != .raw, !configuration.livePhoto {
+                captureWithStillImageOutput(configuration)
+            } else {
+                finishCapture(error: CameraError.cannotConfigure)
+            }
             return
         }
         guard let rawFormat = photoOutput.availableRawPhotoPixelFormatTypes.first else {
@@ -755,6 +767,9 @@ final class CameraController: ObservableObject {
                         configuration: configuration
                     )
                 }.value
+                if let thumbnail = CameraImageProcessor.thumbnail(from: processed.data) {
+                    latestCaptureThumbnail = UIImage(cgImage: thumbnail)
+                }
                 try await saveToPhotoLibrary(processed)
                 GrainHaptics.mediumImpact(enabled: true)
                 notice = "已保存到照片图库"
@@ -1118,6 +1133,21 @@ private enum CameraImageProcessor {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
         return formatter.string(from: Date())
+    }
+
+    static func thumbnail(from data: Data) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return nil
+        }
+        return CGImageSourceCreateThumbnailAtIndex(
+            source,
+            0,
+            [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 360
+            ] as CFDictionary
+        )
     }
 }
 
@@ -1545,6 +1575,11 @@ struct CameraView: View {
         .onChange(of: resolution) { _, value in
             camera.setPhotoResolution(value)
         }
+        .onChange(of: camera.isReady) { _, ready in
+            if ready {
+                camera.setPhotoResolution(resolution)
+            }
+        }
         .simultaneousGesture(edgeSwipeBackGesture)
     }
 
@@ -1562,6 +1597,21 @@ struct CameraView: View {
             .buttonStyle(.plain)
 
             Spacer()
+
+            Button {
+                withAnimation(.snappy(duration: 0.22)) {
+                    showCameraFilters.toggle()
+                }
+            } label: {
+                Image(systemName: "camera.filters")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(
+                        cameraProfile == .neutral ? GrainTheme.paper.opacity(0.66) : GrainTheme.accent
+                    )
+                    .frame(width: 38, height: 38)
+                    .background(Color.black.opacity(0.58), in: Circle())
+            }
+            .buttonStyle(.plain)
 
             Button {
                 if let index = CameraFlashSetting.allCases.firstIndex(of: flash) {
@@ -1732,24 +1782,30 @@ struct CameraView: View {
 
             HStack {
                 Button {
-                    withAnimation(.snappy(duration: 0.22)) {
-                        showCameraFilters.toggle()
-                    }
+                    closeCamera()
                 } label: {
-                    VStack(spacing: 2) {
-                        Image(systemName: "camera.filters")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text(cameraProfile.shortName)
-                            .font(.system(size: 7.5, weight: .bold, design: .rounded))
-                            .lineLimit(1)
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.black.opacity(0.54))
+                        if let thumbnail = camera.latestCaptureThumbnail {
+                            Image(uiImage: thumbnail)
+                                .resizable()
+                                .scaledToFill()
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        } else {
+                            Image(systemName: "photo.on.rectangle")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundStyle(GrainTheme.paper)
+                        }
                     }
-                    .foregroundStyle(
-                        cameraProfile == .neutral ? GrainTheme.paper.opacity(0.66) : GrainTheme.accent
-                    )
-                    .frame(width: 64, height: 42)
-                    .background(Color.black.opacity(0.54), in: Capsule())
+                    .frame(width: 46, height: 46)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 0.8)
+                    }
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("打开照片图库")
 
                 Spacer()
 
