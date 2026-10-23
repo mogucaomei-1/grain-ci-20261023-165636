@@ -1,5 +1,4 @@
 import AVFoundation
-import CoreImage
 import ImageIO
 import Photos
 import SwiftUI
@@ -121,63 +120,13 @@ struct CameraCaptureConfiguration {
     let livePhoto: Bool
 }
 
-private struct CameraPreviewLook {
-    let profile: FilmProfile
-    let settings: FilmSettings
-    let intensity: Double
-}
-
-private final class CameraPreviewLookStore: @unchecked Sendable {
-    private let lock = NSLock()
-    private var suspended = false
-    private var value = CameraPreviewLook(
-        profile: .neutral,
-        settings: FilmProfile.neutral.factorySettings,
-        intensity: 1
-    )
-
-    func update(profile: FilmProfile, settings: FilmSettings, intensity: Double) {
-        lock.lock()
-        value = CameraPreviewLook(profile: profile, settings: settings, intensity: intensity)
-        lock.unlock()
-    }
-
-    func read() -> CameraPreviewLook {
-        lock.lock()
-        defer { lock.unlock() }
-        return value
-    }
-
-    func setSuspended(_ value: Bool) {
-        lock.lock()
-        suspended = value
-        lock.unlock()
-    }
-
-    func isSuspended() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return suspended
-    }
-}
-
 final class CameraController: ObservableObject {
     let session = AVCaptureSession()
     private let photoOutput = AVCapturePhotoOutput()
-    private let videoOutput = AVCaptureVideoDataOutput()
     private let sessionQueue = DispatchQueue(label: "studio.grain.camera.session")
-    private let videoOutputQueue = DispatchQueue(
-        label: "studio.grain.camera.preview",
-        qos: .userInitiated
-    )
-    private let previewLookStore = CameraPreviewLookStore()
-    private lazy var videoPreviewDelegate = CameraVideoPreviewDelegate(
-        lookStore: previewLookStore
-    )
     private var cameraDevice: AVCaptureDevice?
     private var videoInput: AVCaptureDeviceInput?
     private var audioInput: AVCaptureDeviceInput?
-    private var videoOutputAttached = false
     private var photoOutputAttached = false
     private var requestedResolution: CameraResolution = .standard24
     private var activeProcessors: [Int64: CameraPhotoCaptureProcessor] = [:]
@@ -220,18 +169,6 @@ final class CameraController: ObservableObject {
         sessionQueue.async { [weak self] in
             self?.session.stopRunning()
         }
-    }
-
-    func attachPreview(_ view: CameraPreviewUIView) {
-        videoPreviewDelegate.previewView = view
-    }
-
-    func setPreviewLook(profile: FilmProfile, settings: FilmSettings, intensity: Double) {
-        previewLookStore.update(
-            profile: profile,
-            settings: settings,
-            intensity: intensity
-        )
     }
 
     func setZoom(_ zoom: CGFloat) {
@@ -500,7 +437,6 @@ final class CameraController: ObservableObject {
             }
             guard generation == self.captureGeneration else { return }
             self.countdown = nil
-            self.previewLookStore.setSuspended(true)
             sessionQueue.async { [weak self] in
                 self?.performCapture(configuration)
             }
@@ -511,7 +447,6 @@ final class CameraController: ObservableObject {
         captureGeneration += 1
         countdown = nil
         isCapturing = false
-        previewLookStore.setSuspended(false)
     }
 
     private func configureSession() {
@@ -538,17 +473,6 @@ final class CameraController: ObservableObject {
             }
             session.addInput(input)
             videoInput = input
-
-            videoOutput.alwaysDiscardsLateVideoFrames = true
-            videoOutput.videoSettings = [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-            ]
-            videoOutput.setSampleBufferDelegate(videoPreviewDelegate, queue: videoOutputQueue)
-            guard session.canAddOutput(videoOutput) else {
-                throw CameraError.cannotConfigure
-            }
-            session.addOutput(videoOutput)
-            videoOutputAttached = true
 
             let dimensions = device.activeFormat.supportedMaxPhotoDimensions
             let initialDimensions = dimensions
@@ -755,7 +679,6 @@ final class CameraController: ObservableObject {
             if let liveURL = output.livePhotoURL {
                 try? FileManager.default.removeItem(at: liveURL)
             }
-            previewLookStore.setSuspended(false)
             isCapturing = false
         }
     }
@@ -816,7 +739,6 @@ final class CameraController: ObservableObject {
             self?.errorMessage = error.localizedDescription
             self?.isCapturing = false
             self?.countdown = nil
-            self?.previewLookStore.setSuspended(false)
         }
     }
 
@@ -1117,7 +1039,6 @@ private enum CameraError: LocalizedError {
 struct CameraPreviewView: UIViewRepresentable {
     let session: AVCaptureSession
     let onFocus: (_ devicePoint: CGPoint, _ lock: Bool) -> Void
-    let onViewCreated: (CameraPreviewUIView) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -1142,7 +1063,6 @@ struct CameraPreviewView: UIViewRepresentable {
         longPress.minimumPressDuration = 0.48
         view.addGestureRecognizer(tap)
         view.addGestureRecognizer(longPress)
-        onViewCreated(view)
         return view
     }
 
@@ -1185,8 +1105,6 @@ struct CameraPreviewView: UIViewRepresentable {
 }
 
 final class CameraPreviewUIView: UIView {
-    private let filteredImageView = UIImageView()
-
     override class var layerClass: AnyClass {
         AVCaptureVideoPreviewLayer.self
     }
@@ -1200,24 +1118,10 @@ final class CameraPreviewUIView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
-        filteredImageView.backgroundColor = .black
-        filteredImageView.contentMode = .scaleAspectFill
-        filteredImageView.clipsToBounds = true
-        filteredImageView.isUserInteractionEnabled = false
-        addSubview(filteredImageView)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        filteredImageView.frame = bounds
-    }
-
-    func updatePreview(_ image: UIImage) {
-        filteredImageView.image = image
     }
 
     func showFocusReticle(at point: CGPoint, locked: Bool) {
@@ -1304,82 +1208,13 @@ final class CameraPreviewUIView: UIView {
         fade.toValue = 1
         fade.duration = 0.16
         reticle.add(fade, forKey: "focus-fade")
-        filteredImageView.layer.addSublayer(reticle)
+        layer.addSublayer(reticle)
         latestFocusLayer = reticle
 
         guard !locked else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self, weak reticle] in
             guard let reticle, self?.latestFocusLayer === reticle else { return }
             reticle.removeFromSuperlayer()
-        }
-    }
-}
-
-private final class CameraVideoPreviewDelegate: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
-    private static let context = CIContext(options: [
-        .cacheIntermediates: false
-    ])
-
-    weak var previewView: CameraPreviewUIView?
-    private let lookStore: CameraPreviewLookStore
-    private var lastFrameTime: CFTimeInterval = 0
-    private var frameDeliveryPending = false
-
-    init(lookStore: CameraPreviewLookStore) {
-        self.lookStore = lookStore
-    }
-
-    func captureOutput(
-        _ output: AVCaptureOutput,
-        didOutput sampleBuffer: CMSampleBuffer,
-        from connection: AVCaptureConnection
-    ) {
-        guard !lookStore.isSuspended() else { return }
-        let now = CACurrentMediaTime()
-        guard !frameDeliveryPending, now - lastFrameTime >= 1.0 / 24.0 else {
-            return
-        }
-        lastFrameTime = now
-        frameDeliveryPending = true
-
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            DispatchQueue.main.async { [weak self] in
-                self?.frameDeliveryPending = false
-            }
-            return
-        }
-
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-
-        let oriented = CIImage(cvPixelBuffer: pixelBuffer).oriented(.right)
-        let extent = oriented.extent
-        let scale = min(1, 1560 / max(max(extent.width, extent.height), 1))
-        let scaled = oriented.applyingFilter("CILanczosScaleTransform", parameters: [
-            kCIInputScaleKey: scale,
-            kCIInputAspectRatioKey: 1
-        ])
-        let look = lookStore.read()
-        let filtered = RawImageProcessor.renderLivePreview(
-            source: scaled,
-            profile: look.profile,
-            settings: look.settings,
-            intensity: look.intensity
-        )
-        guard let image = Self.context.createCGImage(
-            filtered,
-            from: filtered.extent.integral
-        ) else {
-            DispatchQueue.main.async { [weak self] in
-                self?.frameDeliveryPending = false
-            }
-            return
-        }
-
-        let uiImage = UIImage(cgImage: image)
-        DispatchQueue.main.async { [weak self] in
-            self?.previewView?.updatePreview(uiImage)
-            self?.frameDeliveryPending = false
         }
     }
 }
@@ -1416,10 +1251,10 @@ struct CameraView: View {
                         onFocus: { devicePoint, lock in
                             camera.focus(at: devicePoint, lock: lock)
                             GrainHaptics.mediumImpact(enabled: true)
-                        },
-                        onViewCreated: camera.attachPreview
+                        }
                     )
                     .simultaneousGesture(pinchToZoomGesture)
+                    cameraLookOverlay
                     framingOverlay
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1482,7 +1317,6 @@ struct CameraView: View {
         .statusBarHidden()
         .task {
             await camera.start()
-            applyCameraPreviewLook()
         }
         .onDisappear {
             camera.stop()
@@ -1499,10 +1333,6 @@ struct CameraView: View {
             if cameraProfile == .neutral {
                 cameraIntensity = 1
             }
-            applyCameraPreviewLook()
-        }
-        .onChange(of: cameraIntensity) { _, _ in
-            applyCameraPreviewLook()
         }
         .onChange(of: resolution) { _, value in
             camera.setPhotoResolution(value)
@@ -1841,7 +1671,10 @@ struct CameraView: View {
                                         startRadius: 2,
                                         endRadius: 34
                                     )
-                                    FilmCameraGlyph(profile: profile)
+                                    FilmCameraGlyph(
+                                        profile: profile,
+                                        animated: cameraProfile == profile
+                                    )
                                         .padding(.horizontal, 2)
                                         .padding(.vertical, 1)
                                 }
@@ -1878,6 +1711,43 @@ struct CameraView: View {
         .overlay {
             RoundedRectangle(cornerRadius: 14)
                 .stroke(GrainTheme.line, lineWidth: 0.7)
+        }
+    }
+
+    private var cameraLookOverlay: some View {
+        GeometryReader { proxy in
+            let available = CGSize(
+                width: proxy.size.width - 18,
+                height: proxy.size.height - 18
+            )
+            let fitted = fittedFrame(for: aspect.ratio, in: available)
+            let rect = fitted.offsetBy(dx: 9, dy: 9)
+
+            if cameraProfile != .neutral {
+                ZStack {
+                    LinearGradient(
+                        colors: cameraProfile.uiPalette,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    .blendMode(.softLight)
+
+                    RadialGradient(
+                        colors: [
+                            cameraProfile.uiPalette[2].opacity(0.58),
+                            .clear
+                        ],
+                        center: UnitPoint(x: 0.70, y: 0.25),
+                        startRadius: 2,
+                        endRadius: max(rect.width, rect.height) * 0.58
+                    )
+                    .blendMode(.screen)
+                }
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX, y: rect.midY)
+                .opacity(cameraIntensity * 0.27)
+                .allowsHitTesting(false)
+            }
         }
     }
 
@@ -1937,15 +1807,6 @@ struct CameraView: View {
 
     private var cameraProfiles: [FilmProfile] {
         FilmProfile.resolvedDisplayOrder(from: filmOrder)
-    }
-
-    private func applyCameraPreviewLook() {
-        let settings = cameraProfile.factorySettings
-        camera.setPreviewLook(
-            profile: cameraProfile,
-            settings: settings,
-            intensity: cameraProfile == .neutral ? 1 : cameraIntensity
-        )
     }
 
     private var edgeSwipeBackGesture: some Gesture {

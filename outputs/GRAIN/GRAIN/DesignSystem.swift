@@ -68,7 +68,7 @@ struct FilmPresetChip: View {
                     startRadius: 1,
                     endRadius: 52
                 )
-                FilmCameraGlyph(profile: profile)
+                FilmCameraGlyph(profile: profile, animated: selected)
                     .frame(width: 76, height: 40)
             }
             .frame(width: 82, height: 42)
@@ -100,209 +100,217 @@ struct FilmPresetChip: View {
 
 struct FilmCameraGlyph: View {
     let profile: FilmProfile
+    var animated = false
 
     var body: some View {
-        GeometryReader { proxy in
-            let width = proxy.size.width
-            let height = proxy.size.height
-            let style = profile.cameraIconStyle
-            let bodyWidth = width * (style == .instant ? 0.80 : 0.88)
-            let bodyHeight = height * (style == .instant ? 0.66 : 0.61)
-            let bodyY = height * 0.10
-            let corner = height * (style == .instant ? 0.08 : 0.16)
-            let lensCenterX = -width * 0.08
-            let lensCenterY = height * 0.14
-            let lensDiameter = height * (style == .instant ? 0.57 : 0.54)
+        TimelineView(.animation(minimumInterval: 1.0 / 18.0, paused: !animated)) { timeline in
+            GeometryReader { proxy in
+                let width = proxy.size.width
+                let height = proxy.size.height
+                let style = profile.cameraIconStyle
+                let phase = animated
+                    ? timeline.date.timeIntervalSinceReferenceDate
+                    : 0
+                let bodyWidth = width * style.bodyWidth
+                let bodyHeight = height * style.bodyHeight
+                let bodyY = height * style.bodyY
+                let corner = height * style.corner
+                let lensDiameter = height * style.lensDiameter
 
-            ZStack {
-                RoundedRectangle(cornerRadius: height * 0.22, style: .continuous)
-                    .fill(Color.black.opacity(0.48))
-                    .frame(width: bodyWidth, height: bodyHeight)
-                    .offset(y: bodyY + height * 0.09)
+                ZStack {
+                    RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        .fill(Color.black.opacity(0.50))
+                        .frame(width: bodyWidth, height: bodyHeight)
+                        .offset(y: bodyY + height * 0.10)
 
-                RoundedRectangle(cornerRadius: corner, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                GrainTheme.paper.opacity(0.98),
-                                profile.uiPalette[2].opacity(0.68),
-                                Color(hex: 0x766F64)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+                    RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: profile.cameraBodyColors(style: style),
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
                         )
-                    )
-                    .frame(width: bodyWidth, height: bodyHeight)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: corner, style: .continuous)
-                            .stroke(Color.white.opacity(0.33), lineWidth: 0.75)
-                    }
-                    .offset(y: bodyY)
+                        .frame(width: bodyWidth, height: bodyHeight)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                                .stroke(Color.white.opacity(0.30), lineWidth: 0.7)
+                        }
+                        .offset(y: bodyY)
 
-                // Leatherette and grip are kept behind the lens so the camera
-                // silhouette remains legible at the small preset-chip size.
-                RoundedRectangle(cornerRadius: corner * 0.45, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.black.opacity(0.76),
-                                Color(hex: 0x25231F).opacity(0.90)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
+                    RoundedRectangle(cornerRadius: corner * 0.38, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.black.opacity(0.78),
+                                    Color(hex: 0x292720)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
                         )
-                    )
-                    .frame(width: bodyWidth * 0.58, height: bodyHeight * 0.45)
-                    .offset(x: bodyWidth * 0.11, y: bodyY + bodyHeight * 0.22)
-                    .overlay {
-                        VStack(spacing: bodyHeight * 0.055) {
-                            ForEach(0..<4, id: \.self) { _ in
-                                Capsule()
-                                    .fill(Color.white.opacity(0.055))
-                                    .frame(width: bodyWidth * 0.47, height: 0.45)
+                        .frame(width: bodyWidth * 0.54, height: bodyHeight * 0.43)
+                        .overlay {
+                            VStack(spacing: max(1, bodyHeight * 0.055)) {
+                                ForEach(0..<4, id: \.self) { _ in
+                                    Capsule()
+                                        .fill(Color.white.opacity(0.05))
+                                        .frame(width: bodyWidth * 0.44, height: 0.45)
+                                }
                             }
                         }
-                        .offset(x: bodyWidth * 0.11, y: bodyY + bodyHeight * 0.21)
-                    }
+                        .offset(x: bodyWidth * 0.13, y: bodyY + bodyHeight * 0.22)
 
-                // The stepped top plate and viewfinder make each camera read as
-                // a complete object rather than a colour swatch.
-                RoundedRectangle(cornerRadius: corner * 0.72, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                profile.uiPalette[2].opacity(0.94),
-                                GrainTheme.paper.opacity(0.86),
-                                profile.uiPalette[1].opacity(0.72)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
+                    if style == .slr {
+                        Path { path in
+                            let topY = bodyY - bodyHeight * 0.49
+                            let peakY = topY - height * 0.12
+                            path.move(to: CGPoint(x: -bodyWidth * 0.19, y: topY))
+                            path.addLine(to: CGPoint(x: -bodyWidth * 0.10, y: peakY))
+                            path.addLine(to: CGPoint(x: bodyWidth * 0.10, y: peakY))
+                            path.addLine(to: CGPoint(x: bodyWidth * 0.19, y: topY))
+                            path.closeSubpath()
+                        }
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    GrainTheme.paper.opacity(0.90),
+                                    profile.uiPalette[1].opacity(0.72)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
                         )
-                    )
-                    .frame(
-                        width: bodyWidth * (style == .rangefinder ? 0.58 : 0.46),
-                        height: bodyHeight * (style == .instant ? 0.22 : 0.18)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: corner * 0.72, style: .continuous)
-                            .stroke(Color.white.opacity(0.28), lineWidth: 0.65)
-                    }
-                    .offset(
-                        x: style == .rangefinder ? -bodyWidth * 0.12 : -bodyWidth * 0.04,
-                        y: bodyY - bodyHeight * 0.56
-                    )
-
-                if style != .instant {
-                    RoundedRectangle(cornerRadius: height * 0.06, style: .continuous)
-                        .fill(Color(hex: 0x151713))
-                        .frame(width: height * 0.22, height: height * 0.15)
                         .overlay {
-                            RoundedRectangle(cornerRadius: height * 0.045, style: .continuous)
-                                .stroke(profile.uiPalette[1].opacity(0.72), lineWidth: 0.7)
-                                .padding(1.4)
+                            Path { path in
+                                let topY = bodyY - bodyHeight * 0.49
+                                let peakY = topY - height * 0.12
+                                path.move(to: CGPoint(x: -bodyWidth * 0.19, y: topY))
+                                path.addLine(to: CGPoint(x: -bodyWidth * 0.10, y: peakY))
+                                path.addLine(to: CGPoint(x: bodyWidth * 0.10, y: peakY))
+                                path.addLine(to: CGPoint(x: bodyWidth * 0.19, y: topY))
+                                path.closeSubpath()
+                            }
+                            .stroke(Color.white.opacity(0.26), lineWidth: 0.7)
+                        }
+                    } else {
+                        RoundedRectangle(cornerRadius: corner * 0.70, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        profile.uiPalette[2].opacity(0.92),
+                                        GrainTheme.paper.opacity(0.86),
+                                        profile.uiPalette[1].opacity(0.68)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                            .frame(
+                                width: bodyWidth * style.topPlateWidth,
+                                height: max(3.2, bodyHeight * style.topPlateHeight)
+                            )
+                            .overlay {
+                                RoundedRectangle(
+                                    cornerRadius: corner * 0.70,
+                                    style: .continuous
+                                )
+                                .stroke(Color.white.opacity(0.28), lineWidth: 0.65)
+                            }
+                            .offset(
+                                x: -bodyWidth * style.topPlateOffset,
+                                y: bodyY - bodyHeight * 0.54
+                            )
+                    }
+
+                    if style == .twinLens {
+                        CameraLensAssembly(
+                            profile: profile,
+                            diameter: lensDiameter * 0.76,
+                            phase: phase,
+                            animated: animated
+                        )
+                        .offset(x: -width * 0.04, y: -height * 0.03)
+
+                        CameraLensAssembly(
+                            profile: profile,
+                            diameter: lensDiameter,
+                            phase: phase + 0.4,
+                            animated: animated
+                        )
+                        .offset(x: -width * 0.04, y: height * 0.20)
+                    } else {
+                        CameraLensAssembly(
+                            profile: profile,
+                            diameter: lensDiameter,
+                            phase: phase,
+                            animated: animated
+                        )
+                        .offset(
+                            x: -width * style.lensOffsetX,
+                            y: height * style.lensOffsetY
+                        )
+                    }
+
+                    RoundedRectangle(cornerRadius: max(1, height * 0.045), style: .continuous)
+                        .fill(Color(hex: 0x151713))
+                        .frame(
+                            width: max(5, height * (style == .digital ? 0.24 : 0.20)),
+                            height: max(4, height * 0.14)
+                        )
+                        .overlay {
+                            RoundedRectangle(
+                                cornerRadius: max(0.8, height * 0.032),
+                                style: .continuous
+                            )
+                            .stroke(profile.uiPalette[1].opacity(0.72), lineWidth: 0.65)
+                            .padding(1.1)
                         }
                         .offset(
-                            x: width * (style == .rangefinder ? 0.27 : 0.31),
-                            y: -height * 0.17
+                            x: width * style.viewfinderX,
+                            y: height * style.viewfinderY
                         )
-                }
 
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                GrainTheme.paper.opacity(0.96),
-                                profile.uiPalette[1].opacity(0.82),
-                                Color(hex: 0x4A4843)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: lensDiameter, height: lensDiameter)
-                    .overlay {
-                        Circle()
-                            .fill(Color.black.opacity(0.92))
-                            .padding(height * 0.047)
-                    }
-                    .overlay {
-                        Circle()
-                            .fill(
-                                AngularGradient(
-                                    colors: [
-                                        profile.uiPalette[0],
-                                        profile.uiPalette[1],
-                                        profile.uiPalette[2],
-                                        profile.uiPalette[0]
-                                    ],
-                                    center: .center
-                                )
-                            )
-                            .padding(height * 0.09)
-                    }
-                    .overlay {
-                        Circle()
-                            .fill(
-                                RadialGradient(
-                                    colors: [
-                                        profile.uiPalette[2].opacity(0.62),
-                                        Color(hex: 0x101817),
-                                        Color.black
-                                    ],
-                                    center: UnitPoint(x: 0.34, y: 0.28),
-                                    startRadius: 0,
-                                    endRadius: lensDiameter * 0.44
-                                )
-                            )
-                            .padding(height * 0.13)
-                    }
-                    .overlay(alignment: .topLeading) {
-                        Circle()
-                            .fill(Color.white.opacity(0.34))
-                            .frame(width: height * 0.075, height: height * 0.075)
-                            .blur(radius: 0.35)
-                            .offset(x: height * 0.15, y: height * 0.10)
-                    }
-                    .offset(x: lensCenterX, y: lensCenterY)
-
-                Circle()
-                    .fill(Color.white.opacity(0.92))
-                    .frame(width: height * 0.055, height: height * 0.055)
-                    .overlay {
-                        Circle()
-                            .fill(profile.uiPalette[1])
-                            .padding(0.8)
-                    }
-                    .offset(x: -width * 0.16, y: height * 0.005)
-
-                RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(profile.uiPalette[0].opacity(0.96))
-                    .frame(width: bodyWidth * 0.21, height: height * 0.08)
-                    .overlay {
-                        Capsule()
-                            .fill(Color.white.opacity(0.24))
-                            .frame(width: bodyWidth * 0.13, height: 0.55)
-                    }
-                    .offset(x: bodyWidth * 0.19, y: bodyY - bodyHeight * 0.34)
-
-                Capsule()
-                    .fill(Color(hex: 0x22211E))
-                    .frame(width: width * 0.12, height: height * 0.075)
-                    .overlay {
-                        Capsule()
-                            .fill(GrainTheme.paper.opacity(0.75))
-                            .padding(1)
-                    }
-                    .offset(x: width * 0.35, y: bodyY - bodyHeight * 0.28)
-
-                if style == .instant {
-                    HStack(spacing: 0) {
-                        ForEach(Array(profile.uiPalette.enumerated()), id: \.offset) { _, color in
-                            Rectangle().fill(color)
+                    RoundedRectangle(cornerRadius: 1.4, style: .continuous)
+                        .fill(profile.uiPalette[0].opacity(0.96))
+                        .frame(width: bodyWidth * 0.18, height: max(2.2, height * 0.065))
+                        .overlay {
+                            Capsule()
+                                .fill(Color.white.opacity(0.24))
+                                .frame(width: bodyWidth * 0.11, height: 0.5)
                         }
+                        .offset(x: bodyWidth * 0.23, y: bodyY - bodyHeight * 0.34)
+
+                    Capsule()
+                        .fill(Color(hex: 0x22211E))
+                        .frame(width: max(4, width * 0.11), height: max(2.5, height * 0.065))
+                        .overlay {
+                            Capsule()
+                                .fill(GrainTheme.paper.opacity(0.70))
+                                .padding(0.8)
+                        }
+                        .offset(x: width * 0.35, y: bodyY - bodyHeight * 0.26)
+
+                    if style == .instant {
+                        HStack(spacing: 0) {
+                            ForEach(Array(profile.uiPalette.enumerated()), id: \.offset) { _, color in
+                                Rectangle().fill(color)
+                            }
+                        }
+                        .frame(width: bodyWidth * 0.74, height: max(1.8, height * 0.052))
+                        .offset(y: bodyY - bodyHeight * 0.41)
                     }
-                    .frame(width: bodyWidth * 0.72, height: height * 0.055)
-                    .offset(x: 0, y: bodyY - bodyHeight * 0.41)
+
+                    Circle()
+                        .fill(animated && phase.truncatingRemainder(dividingBy: 1.6) < 0.8
+                            ? Color(hex: 0x83D39B)
+                            : Color(hex: 0x3F5D47))
+                        .frame(width: max(1.7, height * 0.036), height: max(1.7, height * 0.036))
+                        .shadow(
+                            color: animated ? profile.uiPalette[1].opacity(0.75) : .clear,
+                            radius: animated ? 2.5 : 0
+                        )
+                        .offset(x: -width * 0.16, y: height * 0.006)
                 }
             }
         }
@@ -310,21 +318,237 @@ struct FilmCameraGlyph: View {
     }
 }
 
+private struct CameraLensAssembly: View {
+    let profile: FilmProfile
+    let diameter: CGFloat
+    let phase: Double
+    let animated: Bool
+
+    var body: some View {
+        Circle()
+            .fill(
+                LinearGradient(
+                    colors: [
+                        GrainTheme.paper.opacity(0.96),
+                        profile.uiPalette[1].opacity(0.82),
+                        Color(hex: 0x4A4843)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .frame(width: diameter, height: diameter)
+            .overlay {
+                Circle()
+                    .fill(Color.black.opacity(0.92))
+                    .padding(diameter * 0.085)
+            }
+            .overlay {
+                Circle()
+                    .fill(
+                        AngularGradient(
+                            colors: [
+                                profile.uiPalette[0],
+                                profile.uiPalette[1],
+                                profile.uiPalette[2],
+                                profile.uiPalette[0]
+                            ],
+                            center: .center
+                        )
+                    )
+                    .padding(diameter * 0.17)
+            }
+            .overlay {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                profile.uiPalette[2].opacity(0.58),
+                                Color(hex: 0x101817),
+                                Color.black
+                            ],
+                            center: UnitPoint(x: 0.34, y: 0.28),
+                            startRadius: 0,
+                            endRadius: diameter * 0.42
+                        )
+                    )
+                    .padding(diameter * 0.24)
+            }
+            .overlay {
+                Circle()
+                    .trim(from: 0.02, to: 0.22)
+                    .stroke(Color.white.opacity(0.72), lineWidth: max(0.7, diameter * 0.035))
+                    .rotationEffect(.degrees(animated ? phase * 62 : -28))
+                    .padding(diameter * 0.12)
+                    .opacity(animated ? 0.85 : 0.34)
+            }
+            .overlay(alignment: .topLeading) {
+                Circle()
+                    .fill(Color.white.opacity(0.38))
+                    .frame(width: diameter * 0.13, height: diameter * 0.13)
+                    .blur(radius: 0.3)
+                    .offset(x: diameter * 0.25, y: diameter * 0.18)
+            }
+    }
+}
+
 private enum FilmCameraIconStyle {
     case rangefinder
-    case instant
+    case slr
     case compact
+    case digital
+    case instant
+    case twinLens
+
+    var bodyWidth: CGFloat {
+        switch self {
+        case .rangefinder: 0.88
+        case .slr: 0.92
+        case .compact: 0.84
+        case .digital: 0.91
+        case .instant: 0.79
+        case .twinLens: 0.72
+        }
+    }
+
+    var bodyHeight: CGFloat {
+        switch self {
+        case .rangefinder: 0.58
+        case .slr: 0.62
+        case .compact: 0.60
+        case .digital: 0.54
+        case .instant: 0.68
+        case .twinLens: 0.72
+        }
+    }
+
+    var bodyY: CGFloat {
+        switch self {
+        case .digital: 0.14
+        case .instant: 0.10
+        case .twinLens: 0.08
+        default: 0.11
+        }
+    }
+
+    var corner: CGFloat {
+        switch self {
+        case .digital: 0.10
+        case .instant: 0.07
+        case .twinLens: 0.10
+        default: 0.16
+        }
+    }
+
+    var lensDiameter: CGFloat {
+        switch self {
+        case .digital: 0.47
+        case .instant: 0.57
+        case .twinLens: 0.34
+        default: 0.54
+        }
+    }
+
+    var lensOffsetX: CGFloat {
+        switch self {
+        case .digital: 0.18
+        case .compact: 0.11
+        default: 0.08
+        }
+    }
+
+    var lensOffsetY: CGFloat {
+        switch self {
+        case .slr: 0.13
+        case .instant: 0.17
+        default: 0.14
+        }
+    }
+
+    var topPlateWidth: CGFloat {
+        self == .rangefinder ? 0.59 : 0.45
+    }
+
+    var topPlateHeight: CGFloat {
+        self == .instant ? 0.20 : 0.17
+    }
+
+    var topPlateOffset: CGFloat {
+        self == .rangefinder ? 0.12 : 0.04
+    }
+
+    var viewfinderX: CGFloat {
+        switch self {
+        case .rangefinder: 0.27
+        case .digital: 0.32
+        case .twinLens: 0.25
+        default: 0.30
+        }
+    }
+
+    var viewfinderY: CGFloat {
+        self == .slr ? -0.20 : -0.17
+    }
 }
 
 private extension FilmProfile {
     var cameraIconStyle: FilmCameraIconStyle {
         switch self {
-        case .dazzFxnR, .dazzCCDR, .dazzDClassic, .dazzGRDR, .dazzDFunS, .dazzClassicU:
+        case .dazzFxnR, .film135t:
             return .rangefinder
-        case .portra, .portra160, .portra800, .nostalgicNeg, .gold, .colorPlus200:
+        case .dazzCCDR, .c200:
+            return .digital
+        case .dazzDClassic, .provia100f, .ektar100, .ektachrome100:
+            return .slr
+        case .dazzGRDR, .superia400, .classicChrome, .realaAce:
+            return .compact
+        case .dazzDFunS, .portra, .portra160, .portra800, .gold, .colorPlus200:
             return .instant
+        case .dazzClassicU, .nostalgicNeg, .pro400h:
+            return .twinLens
         default:
             return .compact
+        }
+    }
+
+    func cameraBodyColors(style: FilmCameraIconStyle) -> [Color] {
+        switch style {
+        case .slr:
+            return [
+                Color(hex: 0x57554F),
+                Color(hex: 0x25241F),
+                Color(hex: 0x121210)
+            ]
+        case .digital:
+            return [
+                GrainTheme.paper.opacity(0.96),
+                uiPalette[1].opacity(0.82),
+                Color(hex: 0x77736B)
+            ]
+        case .instant:
+            return [
+                GrainTheme.paper,
+                uiPalette[2].opacity(0.72),
+                Color(hex: 0xB5AD9E)
+            ]
+        case .twinLens:
+            return [
+                Color(hex: 0xB8B0A2),
+                Color(hex: 0x5A554B),
+                Color(hex: 0x201F1C)
+            ]
+        case .compact:
+            return [
+                Color(hex: 0x8D8980),
+                Color(hex: 0x45433D),
+                Color(hex: 0x181815)
+            ]
+        case .rangefinder:
+            return [
+                GrainTheme.paper.opacity(0.98),
+                uiPalette[2].opacity(0.68),
+                Color(hex: 0x766F64)
+            ]
         }
     }
 }
