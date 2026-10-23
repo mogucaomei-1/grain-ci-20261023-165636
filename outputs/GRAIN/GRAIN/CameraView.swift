@@ -183,7 +183,10 @@ final class CameraController: ObservableObject {
 
                 try device.lockForConfiguration()
                 device.cancelVideoZoomRamp()
-                device.videoZoomFactor = hardwareZoom
+                device.ramp(
+                    toVideoZoomFactor: hardwareZoom,
+                    withRate: max(6, abs(hardwareZoom - device.videoZoomFactor) * 8)
+                )
                 device.unlockForConfiguration()
                 DispatchQueue.main.async { [weak self] in
                     self?.selectedZoom = zoom
@@ -534,11 +537,18 @@ final class CameraController: ObservableObject {
     }
 
     private func captureProcessed(_ configuration: CameraCaptureConfiguration) {
-        // Use the output's default system-selected codec for maximum device
-        // compatibility, then encode the requested HEIF/PNG locally.
-        let settings = AVCapturePhotoSettings()
-
-        settings.photoQualityPrioritization = .quality
+        let settings: AVCapturePhotoSettings
+        if configuration.livePhoto {
+            settings = AVCapturePhotoSettings()
+        } else if photoOutput.availablePhotoCodecTypes.contains(.hevc) {
+            settings = AVCapturePhotoSettings(
+                format: [AVVideoCodecKey: AVVideoCodecType.hevc]
+            )
+        } else {
+            settings = AVCapturePhotoSettings(
+                format: [AVVideoCodecKey: AVVideoCodecType.jpeg]
+            )
+        }
         applyCommonSettings(settings, configuration: configuration)
         settings.livePhotoMovieFileURL = configuration.livePhoto
             && photoOutput.isLivePhotoCaptureSupported
@@ -1194,7 +1204,7 @@ struct CameraView: View {
     @State private var cameraProfile: FilmProfile = .neutral
     @State private var cameraIntensity = 1.0
     @State private var didSwipeBack = false
-    @State private var showCameraFilters = true
+    @State private var showCameraFilters = false
     @State private var isPreparingLivePhoto = false
 
     private let zoomOptions: [CGFloat] = [0.5, 1, 2, 4, 8]
