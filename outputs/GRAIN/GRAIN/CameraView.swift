@@ -129,6 +129,7 @@ private struct CameraPreviewLook {
 
 private final class CameraPreviewLookStore: @unchecked Sendable {
     private let lock = NSLock()
+    private var suspended = false
     private var value = CameraPreviewLook(
         profile: .neutral,
         settings: FilmProfile.neutral.factorySettings,
@@ -146,9 +147,20 @@ private final class CameraPreviewLookStore: @unchecked Sendable {
         defer { lock.unlock() }
         return value
     }
+
+    func setSuspended(_ value: Bool) {
+        lock.lock()
+        suspended = value
+        lock.unlock()
+    }
+
+    func isSuspended() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return suspended
+    }
 }
 
-@MainActor
 final class CameraController: ObservableObject {
     let session = AVCaptureSession()
     private let photoOutput = AVCapturePhotoOutput()
@@ -169,6 +181,7 @@ final class CameraController: ObservableObject {
     private var photoOutputAttached = false
     private var requestedResolution: CameraResolution = .standard24
     private var activeProcessors: [Int64: CameraPhotoCaptureProcessor] = [:]
+    private let processorLock = NSLock()
     private var captureGeneration = 0
 
     @Published private(set) var isReady = false
@@ -192,7 +205,9 @@ final class CameraController: ObservableObject {
     func start() async {
         let cameraAllowed = await requestMediaAccess(for: .video)
         guard cameraAllowed else {
-            errorMessage = "请在系统设置中允许 GRAIN 使用相机。"
+            DispatchQueue.main.async { [weak self] in
+                self?.errorMessage = "请在系统设置中允许 GRAIN 使用相机。"
+            }
             return
         }
         sessionQueue.async { [weak self] in
@@ -220,7 +235,6 @@ final class CameraController: ObservableObject {
     }
 
     func setZoom(_ zoom: CGFloat) {
-        guard cameraDevice != nil else { return }
         sessionQueue.async { [weak self] in
             guard let self, let device = self.cameraDevice else { return }
             do {
@@ -261,8 +275,8 @@ final class CameraController: ObservableObject {
     }
 
     func focus(at devicePoint: CGPoint, lock: Bool) {
-        guard let cameraDevice else { return }
-        sessionQueue.async {
+        sessionQueue.async { [weak self] in
+            guard let cameraDevice = self?.cameraDevice else { return }
             do {
                 try cameraDevice.lockForConfiguration()
                 if cameraDevice.isFocusPointOfInterestSupported {
@@ -283,9 +297,12 @@ final class CameraController: ObservableObject {
     }
 
     func setExposureBias(_ value: Float) {
-        guard let cameraDevice else { return }
-        let clamped = min(max(value, cameraDevice.minExposureTargetBias), cameraDevice.maxExposureTargetBias)
-        sessionQueue.async {
+        sessionQueue.async { [weak self] in
+            guard let cameraDevice = self?.cameraDevice else { return }
+            let clamped = min(
+                max(value, cameraDevice.minExposureTargetBias),
+                cameraDevice.maxExposureTargetBias
+            )
             do {
                 try cameraDevice.lockForConfiguration()
                 cameraDevice.setExposureTargetBias(clamped)
@@ -302,28 +319,27 @@ final class CameraController: ObservableObject {
     }
 
     func setPhotoResolution(_ resolution: CameraResolution) {
-        requestedResolution = resolution
-        guard let format = cameraDevice?.activeFormat else { return }
-        let supported = format.supportedMaxPhotoDimensions
-        guard !supported.isEmpty else { return }
-        let targetPixels = resolution.targetPixels
-        let best = supported
-            .filter { Double($0.width) * Double($0.height) <= targetPixels * 1.08 }
-            .max(by: {
-                Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
-            })
-            ?? supported.max(by: {
-                Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
-            })
-        guard let best else { return }
-
         sessionQueue.async { [weak self] in
             guard let self, let device = self.cameraDevice else { return }
+            self.requestedResolution = resolution
             self.session.beginConfiguration()
+            self.selectPhotoFormatIfNeeded(for: device, resolution: resolution)
             self.updatePhotoDimensions(for: device)
             self.session.commitConfiguration()
+
+            let supported = device.activeFormat.supportedMaxPhotoDimensions
+            let targetPixels = resolution.targetPixels
+            let selected = supported
+                .filter { Double($0.width) * Double($0.height) <= targetPixels * 1.08 }
+                .max(by: {
+                    Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+                })
+                ?? supported.max(by: {
+                    Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+                })
+            guard let selected else { return }
             DispatchQueue.main.async {
-                self.maxPhotoDimensions = best
+                self.maxPhotoDimensions = selected
             }
         }
     }
@@ -345,17 +361,29 @@ final class CameraController: ObservableObject {
         }
     }
 
-    private func promoteToHighestPhotoFormat(_ device: AVCaptureDevice) {
-        let best = device.formats.max { lhs, rhs in
-            maximumPhotoArea(lhs) < maximumPhotoArea(rhs)
+    private func selectPhotoFormatIfNeeded(
+        for device: AVCaptureDevice,
+        resolution: CameraResolution
+    ) {
+        guard resolution == .high48 else { return }
+        let currentArea = maximumPhotoArea(device.activeFormat)
+        guard Double(currentArea) < resolution.targetPixels * 0.90 else { return }
+        let best = device.formats
+            .filter {
+                maximumPhotoArea($0) >= Int(resolution.targetPixels * 0.90)
+            }
+            .min {
+                maximumPhotoArea($0) < maximumPhotoArea($1)
+            }
+        guard let best else {
+            return
         }
-        guard let best, best !== device.activeFormat else { return }
         do {
             try device.lockForConfiguration()
             device.activeFormat = best
             device.unlockForConfiguration()
         } catch {
-            // Keep the system format when another camera operation holds the lock.
+            // Keep the system format and let PhotoOutput report an unsupported size.
         }
     }
 
@@ -370,7 +398,9 @@ final class CameraController: ObservableObject {
         if enabled {
             let allowed = await requestMediaAccess(for: .audio)
             guard allowed else {
-                errorMessage = "请在系统设置中允许麦克风权限后再使用实况照片。"
+                DispatchQueue.main.async { [weak self] in
+                    self?.errorMessage = "请在系统设置中允许麦克风权限后再使用实况照片。"
+                }
                 return false
             }
         }
@@ -430,7 +460,10 @@ final class CameraController: ObservableObject {
                     throw CameraError.cannotConfigure
                 }
                 self.session.addInput(newInput)
-                self.promoteToHighestPhotoFormat(device)
+                self.selectPhotoFormatIfNeeded(
+                    for: device,
+                    resolution: self.requestedResolution
+                )
                 self.updatePhotoDimensions(for: device)
                 self.session.commitConfiguration()
                 self.videoInput = newInput
@@ -455,17 +488,19 @@ final class CameraController: ObservableObject {
         isCapturing = true
         errorMessage = nil
 
-        Task {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             if configuration.timer.seconds > 0 {
                 for value in stride(from: configuration.timer.seconds, through: 1, by: -1) {
-                    guard generation == captureGeneration else { return }
-                    countdown = value
+                    guard generation == self.captureGeneration else { return }
+                    self.countdown = value
                     GrainHaptics.selection(enabled: true)
                     try? await Task.sleep(for: .seconds(1))
                 }
             }
-            guard generation == captureGeneration else { return }
-            countdown = nil
+            guard generation == self.captureGeneration else { return }
+            self.countdown = nil
+            self.previewLookStore.setSuspended(true)
             sessionQueue.async { [weak self] in
                 self?.performCapture(configuration)
             }
@@ -476,6 +511,7 @@ final class CameraController: ObservableObject {
         captureGeneration += 1
         countdown = nil
         isCapturing = false
+        previewLookStore.setSuspended(false)
     }
 
     private func configureSession() {
@@ -502,7 +538,6 @@ final class CameraController: ObservableObject {
             }
             session.addInput(input)
             videoInput = input
-            promoteToHighestPhotoFormat(device)
 
             videoOutput.alwaysDiscardsLateVideoFrames = true
             videoOutput.videoSettings = [
@@ -637,7 +672,8 @@ final class CameraController: ObservableObject {
 
         settings.photoQualityPrioritization = .quality
         applyCommonSettings(settings, configuration: configuration)
-        settings.livePhotoMovieFileURL = configuration.livePhoto && isLivePhotoSupported
+        settings.livePhotoMovieFileURL = configuration.livePhoto
+            && photoOutput.isLivePhotoCaptureSupported
             ? temporaryLivePhotoURL()
             : nil
         if settings.livePhotoMovieFileURL != nil {
@@ -677,7 +713,9 @@ final class CameraController: ObservableObject {
         ) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.processorLock.lock()
                 self.activeProcessors.removeValue(forKey: id)
+                self.processorLock.unlock()
                 switch result {
                 case .success(let output):
                     self.processCapturedOutput(output, configuration: configuration)
@@ -686,7 +724,9 @@ final class CameraController: ObservableObject {
                 }
             }
         }
+        processorLock.lock()
         activeProcessors[id] = processor
+        processorLock.unlock()
         photoOutput.capturePhoto(with: settings, delegate: processor)
     }
 
@@ -694,7 +734,8 @@ final class CameraController: ObservableObject {
         _ output: CameraCapturedOutput,
         configuration: CameraCaptureConfiguration
     ) {
-        Task {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
                 let processed = try await Task.detached(priority: .userInitiated) {
                     try CameraImageProcessor.prepare(
@@ -714,6 +755,7 @@ final class CameraController: ObservableObject {
             if let liveURL = output.livePhotoURL {
                 try? FileManager.default.removeItem(at: liveURL)
             }
+            previewLookStore.setSuspended(false)
             isCapturing = false
         }
     }
@@ -770,9 +812,12 @@ final class CameraController: ObservableObject {
     }
 
     private func finishCapture(error: Error) {
-        errorMessage = error.localizedDescription
-        isCapturing = false
-        countdown = nil
+        DispatchQueue.main.async { [weak self] in
+            self?.errorMessage = error.localizedDescription
+            self?.isCapturing = false
+            self?.countdown = nil
+            self?.previewLookStore.setSuspended(false)
+        }
     }
 
     private func temporaryLivePhotoURL() -> URL {
@@ -1289,6 +1334,7 @@ private final class CameraVideoPreviewDelegate: NSObject, AVCaptureVideoDataOutp
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        guard !lookStore.isSuspended() else { return }
         let now = CACurrentMediaTime()
         guard !frameDeliveryPending, now - lastFrameTime >= 1.0 / 24.0 else {
             return
@@ -1353,7 +1399,7 @@ struct CameraView: View {
     @State private var cameraProfile: FilmProfile = .neutral
     @State private var cameraIntensity = 1.0
     @State private var didSwipeBack = false
-    @State private var showCameraFilters = false
+    @State private var showCameraFilters = true
     @State private var isPreparingLivePhoto = false
 
     private let zoomOptions: [CGFloat] = [0.5, 1, 2, 4, 8]
