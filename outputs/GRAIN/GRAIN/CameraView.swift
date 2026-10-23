@@ -380,6 +380,7 @@ final class CameraController: ObservableObject {
                     return
                 }
                 self.session.beginConfiguration()
+                var hasAudio = !enabled
                 if enabled {
                     if let microphone = AVCaptureDevice.default(for: .audio),
                        let input = try? AVCaptureDeviceInput(device: microphone),
@@ -387,15 +388,18 @@ final class CameraController: ObservableObject {
                        self.session.canAddInput(input) {
                         self.session.addInput(input)
                         self.audioInput = input
+                        hasAudio = true
+                    } else if self.audioInput != nil {
+                        hasAudio = true
                     }
                 } else if let audioInput = self.audioInput {
                     self.session.removeInput(audioInput)
                     self.audioInput = nil
                 }
                 self.photoOutput.isLivePhotoCaptureEnabled =
-                    enabled && self.photoOutput.isLivePhotoCaptureSupported
+                    enabled && hasAudio && self.isLivePhotoSupported
                 self.session.commitConfiguration()
-                let armed = enabled && self.photoOutput.isLivePhotoCaptureEnabled
+                let armed = enabled && hasAudio
                 DispatchQueue.main.async {
                     self.isLivePhotoArmed = armed
                     continuation.resume(returning: armed)
@@ -515,9 +519,6 @@ final class CameraController: ObservableObject {
             session.addInput(input)
             videoInput = input
 
-            guard session.canAddOutput(photoOutput) else {
-                throw CameraError.cannotConfigure
-            }
             videoOutput.alwaysDiscardsLateVideoFrames = true
             videoOutput.videoSettings = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
@@ -529,8 +530,6 @@ final class CameraController: ObservableObject {
             session.addOutput(videoOutput)
             videoOutputAttached = true
 
-            session.addOutput(photoOutput)
-            photoOutputAttached = true
             photoOutput.isLivePhotoCaptureEnabled = false
 
             let dimensions = device.activeFormat.supportedMaxPhotoDimensions
@@ -547,12 +546,9 @@ final class CameraController: ObservableObject {
             }
 
             cameraDevice = device
-            let liveSupported = photoOutput.isLivePhotoCaptureSupported
-            let rawSupported = !photoOutput.availableRawPhotoPixelFormatTypes.isEmpty
+            let liveSupported = true
+            let rawSupported = device.position == .back
             let maxDims = initialDimensions ?? CMVideoDimensions(width: 0, height: 0)
-
-            session.removeOutput(photoOutput)
-            photoOutputAttached = false
 
             stillImageOutput.outputSettings = [
                 AVVideoCodecKey: AVVideoCodecType.jpeg,
