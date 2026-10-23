@@ -152,6 +152,7 @@ private final class CameraPreviewLookStore: @unchecked Sendable {
 final class CameraController: ObservableObject {
     let session = AVCaptureSession()
     private let photoOutput = AVCapturePhotoOutput()
+    private let stillImageOutput = AVCaptureStillImageOutput()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let sessionQueue = DispatchQueue(label: "studio.grain.camera.session")
     private let videoOutputQueue = DispatchQueue(
@@ -166,6 +167,8 @@ final class CameraController: ObservableObject {
     private var videoInput: AVCaptureDeviceInput?
     private var audioInput: AVCaptureDeviceInput?
     private var videoOutputAttached = false
+    private var stillImageOutputAttached = false
+    private var photoOutputAttached = false
     private var activeProcessors: [Int64: CameraPhotoCaptureProcessor] = [:]
     private var captureGeneration = 0
 
@@ -457,8 +460,17 @@ final class CameraController: ObservableObject {
             sessionQueue.async { [weak self] in
                 guard let self else { return }
                 self.detachVideoOutputForCapture()
+                let needsPhotoOutput = configuration.format == .raw || configuration.livePhoto
+                let isReady = self.configureCaptureOutput(
+                    usePhotoOutput: needsPhotoOutput,
+                    livePhoto: configuration.livePhoto
+                )
                 DispatchQueue.main.async {
-                    self.performCapture(configuration)
+                    if isReady {
+                        self.performCapture(configuration)
+                    } else {
+                        self.finishCapture(error: CameraError.cannotConfigure)
+                    }
                 }
             }
         }
@@ -508,7 +520,9 @@ final class CameraController: ObservableObject {
             }
             session.addOutput(videoOutput)
             videoOutputAttached = true
+
             session.addOutput(photoOutput)
+            photoOutputAttached = true
             photoOutput.isLivePhotoCaptureEnabled = false
 
             let dimensions = device.activeFormat.supportedMaxPhotoDimensions
@@ -528,6 +542,20 @@ final class CameraController: ObservableObject {
             let liveSupported = photoOutput.isLivePhotoCaptureSupported
             let rawSupported = !photoOutput.availableRawPhotoPixelFormatTypes.isEmpty
             let maxDims = initialDimensions ?? CMVideoDimensions(width: 0, height: 0)
+
+            session.removeOutput(photoOutput)
+            photoOutputAttached = false
+
+            stillImageOutput.outputSettings = [
+                AVVideoCodecKey: AVVideoCodecType.jpeg,
+                AVVideoQualityKey: 1.0
+            ]
+            stillImageOutput.isHighResolutionStillImageOutputEnabled = true
+            guard session.canAddOutput(stillImageOutput) else {
+                throw CameraError.cannotConfigure
+            }
+            session.addOutput(stillImageOutput)
+            stillImageOutputAttached = true
 
             session.commitConfiguration()
             didCommitConfiguration = true
@@ -603,6 +631,10 @@ final class CameraController: ObservableObject {
     }
 
     private func performCapture(_ configuration: CameraCaptureConfiguration) {
+        if configuration.format != .raw, !configuration.livePhoto {
+            captureWithStillImageOutput(configuration)
+            return
+        }
         guard let rawFormat = photoOutput.availableRawPhotoPixelFormatTypes.first else {
             if configuration.format == .raw {
                 finishCapture(error: CameraError.rawUnavailable)
@@ -616,6 +648,37 @@ final class CameraController: ObservableObject {
             captureRaw(configuration, rawFormat: rawFormat)
         } else {
             captureProcessed(configuration)
+        }
+    }
+
+    private func captureWithStillImageOutput(_ configuration: CameraCaptureConfiguration) {
+        guard let connection = stillImageOutput.connection(with: .video) else {
+            finishCapture(error: CameraError.cannotConfigure)
+            return
+        }
+        stillImageOutput.captureStillImageAsynchronously(from: connection) { [weak self] buffer, error in
+            guard let self else { return }
+            if let error {
+                DispatchQueue.main.async {
+                    self.finishCapture(error: error)
+                }
+                return
+            }
+            guard let buffer,
+                  let data = AVCaptureStillImageOutput.jpegStillImageNSDataRepresentation(buffer)
+            else {
+                DispatchQueue.main.async {
+                    self.finishCapture(error: CameraError.missingPhotoData)
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                self.reattachVideoOutputAfterCapture()
+                self.processCapturedOutput(
+                    CameraCapturedOutput(data: data, livePhotoURL: nil),
+                    configuration: configuration
+                )
+            }
         }
     }
 
@@ -775,6 +838,34 @@ final class CameraController: ObservableObject {
         session.removeOutput(videoOutput)
         session.commitConfiguration()
         videoOutputAttached = false
+    }
+
+    private func configureCaptureOutput(usePhotoOutput: Bool, livePhoto: Bool) -> Bool {
+        session.beginConfiguration()
+        if usePhotoOutput {
+            if stillImageOutputAttached {
+                session.removeOutput(stillImageOutput)
+                stillImageOutputAttached = false
+            }
+            if !photoOutputAttached, session.canAddOutput(photoOutput) {
+                session.addOutput(photoOutput)
+                photoOutputAttached = true
+            }
+            photoOutput.isLivePhotoCaptureEnabled =
+                livePhoto && photoOutput.isLivePhotoCaptureSupported
+        } else {
+            photoOutput.isLivePhotoCaptureEnabled = false
+            if photoOutputAttached {
+                session.removeOutput(photoOutput)
+                photoOutputAttached = false
+            }
+            if !stillImageOutputAttached, session.canAddOutput(stillImageOutput) {
+                session.addOutput(stillImageOutput)
+                stillImageOutputAttached = true
+            }
+        }
+        session.commitConfiguration()
+        return usePhotoOutput ? photoOutputAttached : stillImageOutputAttached
     }
 
     private func reattachVideoOutputAfterCapture() {

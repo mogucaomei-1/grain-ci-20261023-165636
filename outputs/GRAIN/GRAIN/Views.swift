@@ -1249,6 +1249,13 @@ private struct AdjustPanel: View {
                     }
                 )
                     .tint(GrainTheme.accent)
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(
+                        TapGesture(count: 2)
+                            .onEnded {
+                                resetSelectedToolToDefault()
+                            }
+                    )
 
                 Text(activeValueText)
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
@@ -1358,6 +1365,42 @@ private struct AdjustPanel: View {
         guard !lastHapticValue.isNaN, abs(value - lastHapticValue) >= step else { return }
         lastHapticValue = value
         GrainHaptics.selection(enabled: hapticsEnabled)
+    }
+
+    private func resetSelectedToolToDefault() {
+        let defaultValue = defaultValue(for: selectedTool)
+        guard abs(value(for: selectedTool) - defaultValue) > 0.0001 else { return }
+        editor.recordUndoSnapshot()
+        setValue(defaultValue, for: selectedTool)
+        editor.markManualAdjustment()
+        lastHapticValue = defaultValue
+        GrainHaptics.mediumImpact(enabled: hapticsEnabled)
+        editor.schedulePreview()
+    }
+
+    private func defaultValue(for tool: AdjustTool) -> Double {
+        if tool == .intensity {
+            return editor.selectedProfile == .neutral ? 100 : 82
+        }
+        let defaults = editor.selectedProfile.factorySettings
+        switch tool {
+        case .intensity: return 0
+        case .exposure: return defaults.exposure
+        case .contrast: return defaults.contrast
+        case .highlights: return defaults.highlights
+        case .shadows: return defaults.shadows
+        case .whites: return defaults.whites
+        case .blacks: return defaults.blacks
+        case .temperature: return defaults.temperature
+        case .tint: return defaults.tint
+        case .vibrance: return defaults.vibrance
+        case .saturation: return defaults.saturation
+        case .clarity: return defaults.clarity
+        case .sharpness: return defaults.sharpness
+        case .fade: return defaults.fade
+        case .grain: return defaults.grain
+        case .vignette: return defaults.vignette
+        }
     }
 }
 
