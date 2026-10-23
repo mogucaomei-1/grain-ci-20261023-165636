@@ -334,6 +334,32 @@ final class CameraController: ObservableObject {
         }
     }
 
+    func setPhotoResolution(_ resolution: CameraResolution) {
+        guard let format = cameraDevice?.activeFormat else { return }
+        let supported = format.supportedMaxPhotoDimensions
+        guard !supported.isEmpty else { return }
+        let targetPixels = resolution.targetPixels
+        let best = supported
+            .filter { Double($0.width) * Double($0.height) <= targetPixels * 1.08 }
+            .max(by: {
+                Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+            })
+            ?? supported.max(by: {
+                Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+            })
+        guard let best else { return }
+
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.session.beginConfiguration()
+            self.photoOutput.maxPhotoDimensions = best
+            self.session.commitConfiguration()
+            DispatchQueue.main.async {
+                self.maxPhotoDimensions = best
+            }
+        }
+    }
+
     func toggleCamera() {
         let targetPosition: AVCaptureDevice.Position = isUsingFrontCamera ? .back : .front
         guard let device = discoverCamera(position: targetPosition) else {
@@ -450,17 +476,22 @@ final class CameraController: ObservableObject {
                 && hasAudioInput
 
             let dimensions = device.activeFormat.supportedMaxPhotoDimensions
-            let maximumDimensions = dimensions.max {
-                Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
-            }
-            if let maximumDimensions {
-                photoOutput.maxPhotoDimensions = maximumDimensions
+            let initialDimensions = dimensions
+                .filter { Double($0.width) * Double($0.height) <= 24_000_000 * 1.08 }
+                .max {
+                    Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+                }
+                ?? dimensions.max {
+                    Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+                }
+            if let initialDimensions {
+                photoOutput.maxPhotoDimensions = initialDimensions
             }
 
             cameraDevice = device
             let liveSupported = photoOutput.isLivePhotoCaptureEnabled
             let rawSupported = !photoOutput.availableRawPhotoPixelFormatTypes.isEmpty
-            let maxDims = maximumDimensions ?? CMVideoDimensions(width: 0, height: 0)
+            let maxDims = initialDimensions ?? CMVideoDimensions(width: 0, height: 0)
 
             session.commitConfiguration()
             didCommitConfiguration = true
@@ -586,23 +617,6 @@ final class CameraController: ObservableObject {
     ) {
         if photoOutput.supportedFlashModes.contains(configuration.flash.captureMode) {
             settings.flashMode = configuration.flash.captureMode
-        }
-
-        let format = cameraDevice?.activeFormat
-        let supported = format?.supportedMaxPhotoDimensions ?? []
-        let desiredPixels = configuration.resolution.targetPixels
-        let bestForTarget = supported
-            .filter { Double($0.width) * Double($0.height) <= desiredPixels * 1.08 }
-            .max(by: {
-                Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
-            })
-        let fallbackMaximum = supported.max(by: {
-            Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
-        })
-        if let bestForTarget {
-            photoOutput.maxPhotoDimensions = bestForTarget
-        } else if let fallbackMaximum {
-            photoOutput.maxPhotoDimensions = fallbackMaximum
         }
     }
 
@@ -1374,6 +1388,9 @@ struct CameraView: View {
         }
         .onChange(of: cameraIntensity) { _, _ in
             applyCameraPreviewLook()
+        }
+        .onChange(of: resolution) { _, value in
+            camera.setPhotoResolution(value)
         }
         .simultaneousGesture(edgeSwipeBackGesture)
     }
