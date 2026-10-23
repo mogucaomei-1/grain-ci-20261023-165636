@@ -661,13 +661,28 @@ final class CameraController: ObservableObject {
         guard await requestPhotoLibraryAddAccess() else {
             throw CameraError.photoLibraryDenied
         }
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension(
+                (output.fileName as NSString).pathExtension.isEmpty
+                    ? "heif"
+                    : (output.fileName as NSString).pathExtension
+            )
+        try output.data.write(to: tempURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
         try await withCheckedThrowingContinuation { continuation in
             PHPhotoLibrary.shared().performChanges {
                 let request = PHAssetCreationRequest.forAsset()
                 let options = PHAssetResourceCreationOptions()
                 options.originalFilename = output.fileName
                 options.uniformTypeIdentifier = output.uniformTypeIdentifier
-                request.addResource(with: .photo, data: output.data, options: options)
+                options.shouldMoveFile = false
+                request.addResource(
+                    with: .photo,
+                    fileURL: tempURL,
+                    options: options
+                )
 
                 if let livePhotoURL = output.livePhotoURL {
                     let videoOptions = PHAssetResourceCreationOptions()
@@ -1228,7 +1243,6 @@ private final class CameraVideoPreviewDelegate: NSObject, AVCaptureVideoDataOutp
 
 struct CameraView: View {
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var editor: EditorViewModel
     @StateObject private var camera = CameraController()
     @State private var format: CameraCaptureFormat = .heif
     @State private var resolution: CameraResolution = .standard24
@@ -1242,6 +1256,7 @@ struct CameraView: View {
     @State private var cameraProfile: FilmProfile = .neutral
     @State private var cameraIntensity = 1.0
     @State private var didSwipeBack = false
+    @State private var showCameraFilters = false
 
     private let zoomOptions: [CGFloat] = [0.5, 1, 2, 4, 8]
 
@@ -1322,8 +1337,6 @@ struct CameraView: View {
         .statusBarHidden()
         .task {
             await camera.start()
-            cameraProfile = editor.selectedProfile
-            cameraIntensity = editor.selectedProfile == .neutral ? 1 : editor.intensity
             applyCameraPreviewLook()
         }
         .onDisappear {
@@ -1425,73 +1438,10 @@ struct CameraView: View {
     }
 
     private var cameraControls: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 8) {
-                Text(cameraProfile.shortName)
-                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                    .foregroundStyle(cameraProfile == .neutral ? GrainTheme.muted : GrainTheme.accent)
-                    .frame(width: 58, alignment: .leading)
-                Slider(value: $cameraIntensity, in: 0...1)
-                    .tint(GrainTheme.accent)
-                    .disabled(cameraProfile == .neutral)
-                Text("\(Int((cameraIntensity * 100).rounded()))%")
-                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(GrainTheme.paper)
-                    .frame(width: 32, alignment: .trailing)
-            }
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 5) {
-                    ForEach(cameraProfiles) { profile in
-                        Button {
-                            if profile != .neutral, cameraProfile == profile {
-                                cameraProfile = .neutral
-                            } else {
-                                cameraProfile = profile
-                                if profile != .neutral {
-                                    cameraIntensity = 0.86
-                                }
-                            }
-                            GrainHaptics.selection(enabled: true)
-                        } label: {
-                            VStack(spacing: 2) {
-                                ZStack {
-                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .fill(
-                                            LinearGradient(
-                                                colors: profile.uiPalette,
-                                                startPoint: .topLeading,
-                                                endPoint: .bottomTrailing
-                                            )
-                                        )
-                                    FilmCameraGlyph(palette: profile.uiPalette)
-                                        .scaleEffect(0.72)
-                                }
-                                .frame(width: 58, height: 36)
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .stroke(
-                                            cameraProfile == profile
-                                                ? GrainTheme.accent
-                                                : Color.white.opacity(0.08),
-                                            lineWidth: cameraProfile == profile ? 2 : 0.7
-                                        )
-                                }
-
-                                Text(profile.shortName)
-                                    .font(.system(size: 7.5, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(
-                                        cameraProfile == profile
-                                            ? GrainTheme.paper
-                                            : GrainTheme.muted
-                                    )
-                                    .lineLimit(1)
-                                    .frame(width: 60)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
+        VStack(spacing: 9) {
+            if showCameraFilters {
+                cameraFilterTray
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
             HStack(spacing: 5) {
@@ -1576,10 +1526,25 @@ struct CameraView: View {
             }
 
             HStack {
-                Text(livePhoto ? "LIVE" : "PHOTO")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundStyle(livePhoto ? GrainTheme.accent : GrainTheme.paper.opacity(0.6))
-                    .frame(width: 58)
+                Button {
+                    withAnimation(.snappy(duration: 0.22)) {
+                        showCameraFilters.toggle()
+                    }
+                } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: "camera.filters")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(cameraProfile.shortName)
+                            .font(.system(size: 7.5, weight: .bold, design: .rounded))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(
+                        cameraProfile == .neutral ? GrainTheme.paper.opacity(0.66) : GrainTheme.accent
+                    )
+                    .frame(width: 64, height: 42)
+                    .background(Color.black.opacity(0.54), in: Capsule())
+                }
+                .buttonStyle(.plain)
 
                 Spacer()
 
@@ -1637,6 +1602,86 @@ struct CameraView: View {
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
+    }
+
+    private var cameraFilterTray: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Text(cameraProfile.shortName)
+                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                    .foregroundStyle(cameraProfile == .neutral ? GrainTheme.muted : GrainTheme.accent)
+                    .frame(width: 70, alignment: .leading)
+                    .lineLimit(1)
+                Slider(value: $cameraIntensity, in: 0...1)
+                    .tint(GrainTheme.accent)
+                    .disabled(cameraProfile == .neutral)
+                Text("\(Int((cameraIntensity * 100).rounded()))%")
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(GrainTheme.paper)
+                    .frame(width: 32, alignment: .trailing)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 5) {
+                    ForEach(cameraProfiles) { profile in
+                        Button {
+                            if profile != .neutral, cameraProfile == profile {
+                                cameraProfile = .neutral
+                            } else {
+                                cameraProfile = profile
+                                if profile != .neutral {
+                                    cameraIntensity = 0.86
+                                }
+                            }
+                            GrainHaptics.selection(enabled: true)
+                        } label: {
+                            VStack(spacing: 2) {
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .fill(
+                                            LinearGradient(
+                                                colors: profile.uiPalette,
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            )
+                                        )
+                                    FilmCameraGlyph(palette: profile.uiPalette)
+                                        .scaleEffect(0.62)
+                                }
+                                .frame(width: 56, height: 31)
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .stroke(
+                                            cameraProfile == profile
+                                                ? GrainTheme.accent
+                                                : Color.white.opacity(0.08),
+                                            lineWidth: cameraProfile == profile ? 2 : 0.7
+                                        )
+                                }
+
+                                Text(profile.shortName)
+                                    .font(.system(size: 7.2, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(
+                                        cameraProfile == profile
+                                            ? GrainTheme.paper
+                                            : GrainTheme.muted
+                                    )
+                                    .lineLimit(1)
+                                    .frame(width: 58)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(GrainTheme.raised, in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(GrainTheme.line, lineWidth: 0.7)
+        }
     }
 
     private var framingOverlay: some View {

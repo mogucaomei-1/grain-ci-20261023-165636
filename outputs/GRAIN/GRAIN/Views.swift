@@ -320,8 +320,8 @@ private struct EditorWorkspace: View {
                     showTextEditor = true
                 }
             )
-            .frame(height: 174)
-            .padding(.bottom, 18)
+            .frame(height: 150)
+            .padding(.bottom, 14)
         }
         .fullScreenCover(isPresented: $showCropEditor) {
             CropEditorView()
@@ -459,7 +459,7 @@ private struct EditorToolsPager: View {
                 }
             }
             .padding(.horizontal, 18)
-            .frame(height: 34)
+            .frame(height: 28)
             .contentShape(Rectangle())
             .gesture(pageSwipeGesture)
 
@@ -634,31 +634,31 @@ private struct PhotoEditorCanvas: View {
     }
 
     private var imageAspect: CGFloat {
+        if let image = editor.editedPreview ?? editor.originalPreview,
+           image.height > 0 {
+            return CGFloat(image.width) / CGFloat(image.height)
+        }
         guard let photo = editor.photo, photo.pixelWidth > 0, photo.pixelHeight > 0 else {
             return 3 / 2
+        }
+        if [5, 6, 7, 8].contains(photo.orientation) {
+            return CGFloat(photo.pixelHeight) / CGFloat(photo.pixelWidth)
         }
         return CGFloat(photo.pixelWidth) / CGFloat(photo.pixelHeight)
     }
 
     private func displayImageSize(in viewport: CGSize) -> CGSize {
-        if imageAspect >= 1 {
-            if imageAspect > viewport.width / max(viewport.height, 1) {
-                return CGSize(
-                    width: viewport.width,
-                    height: viewport.width / max(imageAspect, 0.01)
-                )
-            }
-            return CGSize(
-                width: viewport.height * imageAspect,
-                height: viewport.height
-            )
-        }
-
         let viewportRatio = viewport.width / max(viewport.height, 1)
         if imageAspect > viewportRatio {
-            return CGSize(width: viewport.height * imageAspect, height: viewport.height)
+            return CGSize(
+                width: viewport.width,
+                height: viewport.width / max(imageAspect, 0.01)
+            )
         }
-        return CGSize(width: viewport.width, height: viewport.width / max(imageAspect, 0.01))
+        return CGSize(
+            width: viewport.height * imageAspect,
+            height: viewport.height
+        )
     }
 }
 

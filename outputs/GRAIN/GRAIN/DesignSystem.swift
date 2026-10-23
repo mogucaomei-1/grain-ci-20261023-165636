@@ -62,12 +62,6 @@ struct FilmPresetChip: View {
                 )
                 FilmCameraGlyph(palette: profile.uiPalette)
                     .frame(width: 54, height: 34)
-                    .offset(x: 12, y: -7)
-                Text(profile.shortName)
-                    .font(.system(size: 7.5, weight: .bold, design: .monospaced))
-                    .tracking(0.7)
-                    .foregroundStyle(.white)
-                    .padding(7)
             }
             .frame(width: 82, height: 42)
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
