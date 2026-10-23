@@ -103,7 +103,7 @@ struct FilmCameraGlyph: View {
     var animated = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 18.0, paused: !animated)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !animated)) { timeline in
             GeometryReader { proxy in
                 let width = proxy.size.width
                 let height = proxy.size.height
@@ -302,13 +302,21 @@ struct FilmCameraGlyph: View {
                     }
 
                     Circle()
-                        .fill(animated && phase.truncatingRemainder(dividingBy: 1.6) < 0.8
-                            ? Color(hex: 0x83D39B)
-                            : Color(hex: 0x3F5D47))
+                        .fill(Color(hex: 0x83D39B))
                         .frame(width: max(1.7, height * 0.036), height: max(1.7, height * 0.036))
+                        .opacity(
+                            animated
+                                ? 0.72 + sin(
+                                    phase.truncatingRemainder(dividingBy: 1.6)
+                                        / 1.6 * .pi * 2
+                                ) * 0.22
+                                : 1
+                        )
                         .shadow(
-                            color: animated ? profile.uiPalette[1].opacity(0.75) : .clear,
-                            radius: animated ? 2.5 : 0
+                            color: animated
+                                ? profile.uiPalette[1].opacity(0.48)
+                                : .clear,
+                            radius: animated ? 2.0 : 0
                         )
                         .offset(x: -width * 0.16, y: height * 0.006)
                 }
@@ -378,7 +386,9 @@ private struct CameraLensAssembly: View {
                 Circle()
                     .trim(from: 0.02, to: 0.22)
                     .stroke(Color.white.opacity(0.72), lineWidth: max(0.7, diameter * 0.035))
-                    .rotationEffect(.degrees(animated ? phase * 62 : -28))
+                    .rotationEffect(
+                        .degrees(animated ? phase.truncatingRemainder(dividingBy: 6) * 60 : -28)
+                    )
                     .padding(diameter * 0.12)
                     .opacity(animated ? 0.85 : 0.34)
             }

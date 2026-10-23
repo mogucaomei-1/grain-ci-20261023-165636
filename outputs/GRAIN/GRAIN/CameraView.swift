@@ -259,11 +259,6 @@ final class CameraController: ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self, let device = self.cameraDevice else { return }
             self.requestedResolution = resolution
-            self.session.beginConfiguration()
-            self.selectPhotoFormatIfNeeded(for: device, resolution: resolution)
-            self.updatePhotoDimensions(for: device)
-            self.session.commitConfiguration()
-
             let supported = device.activeFormat.supportedMaxPhotoDimensions
             let targetPixels = resolution.targetPixels
             let selected = supported
@@ -281,11 +276,11 @@ final class CameraController: ObservableObject {
         }
     }
 
-    private func updatePhotoDimensions(for device: AVCaptureDevice) {
+    private func preferredPhotoDimensions(for device: AVCaptureDevice) -> CMVideoDimensions? {
         let supported = device.activeFormat.supportedMaxPhotoDimensions
-        guard !supported.isEmpty else { return }
+        guard !supported.isEmpty else { return nil }
         let targetPixels = requestedResolution.targetPixels
-        let best = supported
+        return supported
             .filter { Double($0.width) * Double($0.height) <= targetPixels * 1.08 }
             .max(by: {
                 Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
@@ -293,41 +288,6 @@ final class CameraController: ObservableObject {
             ?? supported.max(by: {
                 Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
             })
-        if let best {
-            photoOutput.maxPhotoDimensions = best
-        }
-    }
-
-    private func selectPhotoFormatIfNeeded(
-        for device: AVCaptureDevice,
-        resolution: CameraResolution
-    ) {
-        guard resolution == .high48 else { return }
-        let currentArea = maximumPhotoArea(device.activeFormat)
-        guard Double(currentArea) < resolution.targetPixels * 0.90 else { return }
-        let best = device.formats
-            .filter {
-                maximumPhotoArea($0) >= Int(resolution.targetPixels * 0.90)
-            }
-            .min {
-                maximumPhotoArea($0) < maximumPhotoArea($1)
-            }
-        guard let best else {
-            return
-        }
-        do {
-            try device.lockForConfiguration()
-            device.activeFormat = best
-            device.unlockForConfiguration()
-        } catch {
-            // Keep the system format and let PhotoOutput report an unsupported size.
-        }
-    }
-
-    private func maximumPhotoArea(_ format: AVCaptureDevice.Format) -> Int {
-        format.supportedMaxPhotoDimensions
-            .map { Int($0.width) * Int($0.height) }
-            .max() ?? 0
     }
 
     func setLivePhotoEnabled(_ enabled: Bool) async -> Bool {
@@ -397,11 +357,6 @@ final class CameraController: ObservableObject {
                     throw CameraError.cannotConfigure
                 }
                 self.session.addInput(newInput)
-                self.selectPhotoFormatIfNeeded(
-                    for: device,
-                    resolution: self.requestedResolution
-                )
-                self.updatePhotoDimensions(for: device)
                 self.session.commitConfiguration()
                 self.videoInput = newInput
                 self.cameraDevice = device
@@ -474,29 +429,18 @@ final class CameraController: ObservableObject {
             session.addInput(input)
             videoInput = input
 
-            let dimensions = device.activeFormat.supportedMaxPhotoDimensions
-            let initialDimensions = dimensions
-                .filter { Double($0.width) * Double($0.height) <= 24_000_000 * 1.08 }
-                .max {
-                    Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
-                }
-                ?? dimensions.max {
-                    Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
-                }
             guard session.canAddOutput(photoOutput) else {
                 throw CameraError.cannotConfigure
             }
             session.addOutput(photoOutput)
             photoOutputAttached = true
-            if let initialDimensions {
-                photoOutput.maxPhotoDimensions = initialDimensions
-            }
             photoOutput.isLivePhotoCaptureEnabled = false
 
             cameraDevice = device
             let liveSupported = photoOutput.isLivePhotoCaptureSupported
             let rawSupported = device.position == .back
-            let maxDims = initialDimensions ?? CMVideoDimensions(width: 0, height: 0)
+            let maxDims = preferredPhotoDimensions(for: device)
+                ?? CMVideoDimensions(width: 0, height: 0)
 
             session.commitConfiguration()
             didCommitConfiguration = true
@@ -893,8 +837,24 @@ private enum CameraImageProcessor {
             guard let source = CGImageSourceCreateWithData(
                 output.data as CFData,
                 nil
-            ),
-            let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+            ) else {
+                throw CameraError.imageDecodeFailed
+            }
+
+            if configuration.format != .png {
+                let identifier = (CGImageSourceGetType(source) as String?)
+                    ?? UTType.heic.identifier
+                let type = UTType(identifier) ?? .heic
+                let fileExtension = type.preferredFilenameExtension ?? "heic"
+                return CameraPreparedOutput(
+                    data: output.data,
+                    fileName: "GRAIN-\(timestamp()).\(fileExtension)",
+                    uniformTypeIdentifier: type.identifier,
+                    livePhotoURL: output.livePhotoURL
+                )
+            }
+
+            guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
                 as? [CFString: Any]
             else {
                 throw CameraError.imageDecodeFailed
@@ -1368,7 +1328,7 @@ struct CameraView: View {
                 Image(systemName: "camera.filters")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(
-                        cameraProfile == .neutral ? GrainTheme.paper.opacity(0.66) : GrainTheme.accent
+                            showCameraFilters ? GrainTheme.accent : GrainTheme.muted
                     )
                     .frame(width: 38, height: 38)
                     .background(Color.black.opacity(0.58), in: Circle())
