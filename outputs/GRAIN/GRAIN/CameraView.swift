@@ -388,9 +388,7 @@ final class CameraController: ObservableObject {
             }
             guard generation == captureGeneration else { return }
             countdown = nil
-            sessionQueue.async { [weak self] in
-                self?.performCapture(configuration)
-            }
+            performCapture(configuration)
         }
     }
 
@@ -555,12 +553,9 @@ final class CameraController: ObservableObject {
     }
 
     private func captureProcessed(_ configuration: CameraCaptureConfiguration) {
-        // Capture a single broadly supported JPEG stream, then encode the
-        // requested HEIF/PNG locally. This avoids hardware HEVC combinations
-        // that can fail when high-resolution photo output and Live Photo are active.
-        let settings = AVCapturePhotoSettings(
-            format: [AVVideoCodecKey: AVVideoCodecType.jpeg]
-        )
+        // Use the output's default system-selected codec for maximum device
+        // compatibility, then encode the requested HEIF/PNG locally.
+        let settings = AVCapturePhotoSettings()
 
         settings.photoQualityPrioritization = .quality
         applyCommonSettings(settings, configuration: configuration)
@@ -630,11 +625,8 @@ final class CameraController: ObservableObject {
                 }
             }
         }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.activeProcessors[id] = processor
-            self.photoOutput.capturePhoto(with: settings, delegate: processor)
-        }
+        activeProcessors[id] = processor
+        photoOutput.capturePhoto(with: settings, delegate: processor)
     }
 
     private func processCapturedOutput(

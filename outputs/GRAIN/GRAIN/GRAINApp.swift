@@ -1,4 +1,5 @@
 import AVFoundation
+import Photos
 import SwiftUI
 
 @main
@@ -20,6 +21,7 @@ struct GRAINApp: App {
 
     private func primeInitialPermissionsAndNetwork() async {
         async let cameraPermission: Bool = requestInitialCameraAccess()
+        async let photoPermission: Bool = requestInitialPhotoAddAccess()
         let request = URLRequest(
             url: URL(string: "https://captive.apple.com/hotspot-detect.html")!,
             cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
@@ -28,9 +30,9 @@ struct GRAINApp: App {
         if !didPrimeInitialNetworkAccess {
             didPrimeInitialNetworkAccess = true
             async let networkAccess: Void = primeNetworkAccess(request)
-            _ = await (cameraPermission, networkAccess)
+            _ = await (cameraPermission, photoPermission, networkAccess)
         } else {
-            _ = await cameraPermission
+            _ = await (cameraPermission, photoPermission)
         }
     }
 
@@ -51,5 +53,22 @@ struct GRAINApp: App {
 
     private func primeNetworkAccess(_ request: URLRequest) async {
         _ = try? await URLSession.shared.data(for: request)
+    }
+
+    private func requestInitialPhotoAddAccess() async -> Bool {
+        switch PHPhotoLibrary.authorizationStatus(for: .addOnly) {
+        case .authorized, .limited:
+            return true
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                    continuation.resume(
+                        returning: status == .authorized || status == .limited
+                    )
+                }
+            }
+        default:
+            return false
+        }
     }
 }
