@@ -169,6 +169,7 @@ final class CameraController: ObservableObject {
     private var videoOutputAttached = false
     private var stillImageOutputAttached = false
     private var photoOutputAttached = false
+    private var requestedResolution: CameraResolution = .standard24
     private var activeProcessors: [Int64: CameraPhotoCaptureProcessor] = [:]
     private var captureGeneration = 0
 
@@ -226,34 +227,32 @@ final class CameraController: ObservableObject {
             guard let self, var device = self.cameraDevice else { return }
             do {
                 if !self.isUsingFrontCamera {
-                    let wantsUltraWide = zoom <= 0.55
-                    let isUltraWide = device.deviceType == .builtInUltraWideCamera
-                    if wantsUltraWide, !isUltraWide,
-                       let ultraWide = AVCaptureDevice.default(
-                           .builtInUltraWideCamera,
-                           for: .video,
-                           position: .back
-                       ),
-                       self.replaceVideoInput(with: ultraWide) {
-                        device = ultraWide
-                    } else if !wantsUltraWide, isUltraWide,
-                              let backCamera = self.discoverCamera(position: .back),
-                              self.replaceVideoInput(with: backCamera) {
-                        device = backCamera
+                    let target = self.physicalBackCamera(for: zoom)
+                    if let target {
+                        if device.deviceType != target.device.deviceType {
+                            if self.replaceVideoInput(with: target.device) {
+                                device = target.device
+                            }
+                        }
+                        let hardwareZoom = min(
+                            max(target.hardwareZoom, device.minAvailableVideoZoomFactor),
+                            device.maxAvailableVideoZoomFactor
+                        )
+                        try device.lockForConfiguration()
+                        device.cancelVideoZoomRamp()
+                        device.videoZoomFactor = hardwareZoom
+                        device.unlockForConfiguration()
+                        DispatchQueue.main.async { [weak self] in
+                            self?.selectedZoom = zoom
+                        }
+                        return
                     }
                 }
 
-                let hardwareZoom: CGFloat
-                if !self.isUsingFrontCamera,
-                   zoom <= 0.55,
-                   device.deviceType == .builtInUltraWideCamera {
-                    hardwareZoom = min(max(1, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
-                } else {
-                    hardwareZoom = min(
-                        max(zoom, device.minAvailableVideoZoomFactor),
-                        device.maxAvailableVideoZoomFactor
-                    )
-                }
+                let hardwareZoom = min(
+                    max(zoom, device.minAvailableVideoZoomFactor),
+                    device.maxAvailableVideoZoomFactor
+                )
 
                 try device.lockForConfiguration()
                 device.cancelVideoZoomRamp()
@@ -268,6 +267,40 @@ final class CameraController: ObservableObject {
                 }
             }
         }
+    }
+
+    private func physicalBackCamera(for displayZoom: CGFloat) -> (device: AVCaptureDevice, hardwareZoom: CGFloat)? {
+        if displayZoom <= 0.55,
+           let ultraWide = AVCaptureDevice.default(
+               .builtInUltraWideCamera,
+               for: .video,
+               position: .back
+           ) {
+            return (ultraWide, 1)
+        }
+        if displayZoom < 3.5,
+           let wide = AVCaptureDevice.default(
+               .builtInWideAngleCamera,
+               for: .video,
+               position: .back
+           ) {
+            return (wide, displayZoom)
+        }
+        if let telephoto = AVCaptureDevice.default(
+            .builtInTelephotoCamera,
+            for: .video,
+            position: .back
+        ) {
+            return (telephoto, max(1, displayZoom / 4))
+        }
+        if let wide = AVCaptureDevice.default(
+            .builtInWideAngleCamera,
+            for: .video,
+            position: .back
+        ) {
+            return (wide, displayZoom)
+        }
+        return nil
     }
 
     private func replaceVideoInput(with device: AVCaptureDevice) -> Bool {
@@ -285,6 +318,7 @@ final class CameraController: ObservableObject {
             session.commitConfiguration()
             videoInput = newInput
             cameraDevice = device
+            updatePhotoDimensions(for: device)
             publishDeviceCapabilities(
                 device,
                 liveSupported: photoOutput.isLivePhotoCaptureSupported,
@@ -338,6 +372,7 @@ final class CameraController: ObservableObject {
     }
 
     func setPhotoResolution(_ resolution: CameraResolution) {
+        requestedResolution = resolution
         guard let format = cameraDevice?.activeFormat else { return }
         let supported = format.supportedMaxPhotoDimensions
         guard !supported.isEmpty else { return }
@@ -360,6 +395,23 @@ final class CameraController: ObservableObject {
             DispatchQueue.main.async {
                 self.maxPhotoDimensions = best
             }
+        }
+    }
+
+    private func updatePhotoDimensions(for device: AVCaptureDevice) {
+        let supported = device.activeFormat.supportedMaxPhotoDimensions
+        guard !supported.isEmpty else { return }
+        let targetPixels = requestedResolution.targetPixels
+        let best = supported
+            .filter { Double($0.width) * Double($0.height) <= targetPixels * 1.08 }
+            .max(by: {
+                Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+            })
+            ?? supported.max(by: {
+                Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height)
+            })
+        if let best {
+            photoOutput.maxPhotoDimensions = best
         }
     }
 
@@ -584,20 +636,6 @@ final class CameraController: ObservableObject {
 
     private func discoverCamera(position: AVCaptureDevice.Position) -> AVCaptureDevice? {
         if position == .back {
-            if let triple = AVCaptureDevice.default(
-                .builtInTripleCamera,
-                for: .video,
-                position: .back
-            ) {
-                return triple
-            }
-            if let dualWide = AVCaptureDevice.default(
-                .builtInDualWideCamera,
-                for: .video,
-                position: .back
-            ) {
-                return dualWide
-            }
             return AVCaptureDevice.default(
                 .builtInWideAngleCamera,
                 for: .video,
@@ -622,9 +660,9 @@ final class CameraController: ObservableObject {
     ) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.minimumZoom = device.minAvailableVideoZoomFactor
-            self.maximumZoom = max(device.maxAvailableVideoZoomFactor, 8)
-            self.selectedZoom = min(max(1, self.minimumZoom), self.maximumZoom)
+            self.minimumZoom = device.position == .back ? 0.5 : 1
+            self.maximumZoom = 8
+            self.selectedZoom = device.position == .back ? 1 : min(max(1, self.minimumZoom), self.maximumZoom)
             self.minimumExposureBias = device.minExposureTargetBias
             self.maximumExposureBias = device.maxExposureTargetBias
             self.exposureBias = min(max(0, device.minExposureTargetBias), device.maxExposureTargetBias)
