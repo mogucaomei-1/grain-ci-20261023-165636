@@ -1266,7 +1266,7 @@ struct CameraView: View {
     @State private var resolution: CameraResolution = .standard24
     @State private var aspect: CameraAspect = .portrait3x4
     @State private var timer: CameraTimer = .off
-    @State private var flash: CameraFlashSetting = .auto
+    @State private var flash: CameraFlashSetting = .off
     @State private var livePhoto = false
     @State private var showGrid = true
     @State private var zoomGestureBase: CGFloat?
