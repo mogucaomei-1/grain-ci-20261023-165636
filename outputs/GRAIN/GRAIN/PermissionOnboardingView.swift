@@ -14,9 +14,11 @@ struct PermissionOnboardingView: View {
     let onComplete: () -> Void
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("networkPermissionReady") private var networkPermissionReady = false
+    @State private var networkState: PermissionStepState = .idle
     @State private var cameraState: PermissionStepState = .idle
     @State private var microphoneState: PermissionStepState = .idle
     @State private var photoState: PermissionStepState = .idle
+    @State private var isCheckingNetwork = false
 
     var body: some View {
         ZStack {
@@ -39,7 +41,8 @@ struct PermissionOnboardingView: View {
                             icon: "wifi",
                             title: "网络",
                             detail: "从 iCloud 获取原始照片",
-                            state: networkPermissionReady ? .granted : .idle,
+                            state: networkState,
+                            deniedTitle: "重试",
                             action: requestNetwork
                         )
                         permissionRow(
@@ -97,6 +100,9 @@ struct PermissionOnboardingView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 refreshExistingPermissions()
+                if networkState == .requesting, !isCheckingNetwork {
+                    Task { await probeNetwork() }
+                }
             }
         }
     }
@@ -117,6 +123,7 @@ struct PermissionOnboardingView: View {
         title: String,
         detail: String,
         state: PermissionStepState,
+        deniedTitle: String = "去设置",
         action: @escaping () -> Void
     ) -> some View {
         HStack(spacing: 13) {
@@ -149,7 +156,7 @@ struct PermissionOnboardingView: View {
                             Text("已开启")
                         }
                     case .denied:
-                        Text("去设置")
+                        Text(deniedTitle)
                     }
                 }
                 .font(.system(size: 10, weight: .bold, design: .rounded))
@@ -173,6 +180,11 @@ struct PermissionOnboardingView: View {
     }
 
     private func refreshExistingPermissions() {
+        if networkPermissionReady {
+            networkState = .granted
+        } else if networkState != .requesting {
+            networkState = .idle
+        }
         cameraState = status(for: AVCaptureDevice.authorizationStatus(for: .video))
         microphoneState = status(for: AVCaptureDevice.authorizationStatus(for: .audio))
         photoState = photoPermissionGranted(
@@ -181,19 +193,39 @@ struct PermissionOnboardingView: View {
     }
 
     private func requestNetwork() {
-        Task {
+        Task { await probeNetwork() }
+    }
+
+    private func probeNetwork() async {
+        guard !isCheckingNetwork, networkState != .granted else { return }
+        isCheckingNetwork = true
+        networkState = .requesting
+        defer { isCheckingNetwork = false }
+
+        var connected = false
+        for attempt in 0..<3 {
             var request = URLRequest(
                 url: URL(string: "https://captive.apple.com/hotspot-detect.html")!
             )
             request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-            request.timeoutInterval = 8
+            request.timeoutInterval = attempt == 0 ? 10 : 6
             do {
                 let (_, response) = try await URLSession.shared.data(for: request)
-                networkPermissionReady = (response as? HTTPURLResponse)?.statusCode == 200
+                if let status = (response as? HTTPURLResponse)?.statusCode,
+                   (200...399).contains(status) {
+                    connected = true
+                    break
+                }
             } catch {
-                networkPermissionReady = false
+                // The first request can be interrupted while iOS presents its
+                // connectivity prompt. Retry after returning to the screen.
+            }
+            if attempt < 2 {
+                try? await Task.sleep(for: .milliseconds(700))
             }
         }
+        networkPermissionReady = connected
+        networkState = connected ? .granted : .denied
     }
 
     private func requestCamera() {

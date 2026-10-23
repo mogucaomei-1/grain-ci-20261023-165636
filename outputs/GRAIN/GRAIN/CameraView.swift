@@ -222,33 +222,11 @@ final class CameraController: ObservableObject {
     func setZoom(_ zoom: CGFloat) {
         guard cameraDevice != nil else { return }
         sessionQueue.async { [weak self] in
-            guard let self, var device = self.cameraDevice else { return }
+            guard let self, let device = self.cameraDevice else { return }
             do {
-                if !self.isUsingFrontCamera {
-                    let target = self.physicalBackCamera(for: zoom)
-                    if let target {
-                        if device.deviceType != target.device.deviceType {
-                            if self.replaceVideoInput(with: target.device) {
-                                device = target.device
-                            }
-                        }
-                        let hardwareZoom = min(
-                            max(target.hardwareZoom, device.minAvailableVideoZoomFactor),
-                            device.maxAvailableVideoZoomFactor
-                        )
-                        try device.lockForConfiguration()
-                        device.cancelVideoZoomRamp()
-                        device.videoZoomFactor = hardwareZoom
-                        device.unlockForConfiguration()
-                        DispatchQueue.main.async { [weak self] in
-                            self?.selectedZoom = zoom
-                        }
-                        return
-                    }
-                }
-
+                let requestedFactor = self.virtualZoomFactor(for: zoom, device: device)
                 let hardwareZoom = min(
-                    max(zoom, device.minAvailableVideoZoomFactor),
+                    max(requestedFactor, device.minAvailableVideoZoomFactor),
                     device.maxAvailableVideoZoomFactor
                 )
 
@@ -267,66 +245,19 @@ final class CameraController: ObservableObject {
         }
     }
 
-    private func physicalBackCamera(for displayZoom: CGFloat) -> (device: AVCaptureDevice, hardwareZoom: CGFloat)? {
-        if displayZoom <= 0.55,
-           let ultraWide = AVCaptureDevice.default(
-               .builtInUltraWideCamera,
-               for: .video,
-               position: .back
-           ) {
-            return (ultraWide, 1)
+    private func virtualZoomFactor(
+        for displayZoom: CGFloat,
+        device: AVCaptureDevice
+    ) -> CGFloat {
+        let hasUltraWide = device.constituentDevices.contains {
+            $0.deviceType == .builtInUltraWideCamera
         }
-        if displayZoom < 3.5,
-           let wide = AVCaptureDevice.default(
-               .builtInWideAngleCamera,
-               for: .video,
-               position: .back
-           ) {
-            return (wide, displayZoom)
-        }
-        if let telephoto = AVCaptureDevice.default(
-            .builtInTelephotoCamera,
-            for: .video,
-            position: .back
-        ) {
-            return (telephoto, max(1, displayZoom / 4))
-        }
-        if let wide = AVCaptureDevice.default(
-            .builtInWideAngleCamera,
-            for: .video,
-            position: .back
-        ) {
-            return (wide, displayZoom)
-        }
-        return nil
-    }
-
-    private func replaceVideoInput(with device: AVCaptureDevice) -> Bool {
-        do {
-            promoteToHighestPhotoFormat(device)
-            let newInput = try AVCaptureDeviceInput(device: device)
-            session.beginConfiguration()
-            if let videoInput {
-                session.removeInput(videoInput)
-            }
-            guard session.canAddInput(newInput) else {
-                session.commitConfiguration()
-                return false
-            }
-            session.addInput(newInput)
-            session.commitConfiguration()
-            videoInput = newInput
-            cameraDevice = device
-            updatePhotoDimensions(for: device)
-            publishDeviceCapabilities(
-                device,
-                liveSupported: photoOutput.isLivePhotoCaptureSupported,
-                rawSupported: !photoOutput.availableRawPhotoPixelFormatTypes.isEmpty
-            )
-            return true
-        } catch {
-            return false
-        }
+        guard hasUltraWide else { return displayZoom }
+        let baseFactor = device.virtualDeviceSwitchOverVideoZoomFactors
+            .first
+            .map { CGFloat(truncating: $0) }
+            ?? 2
+        return max(0.5, displayZoom) * baseFactor
     }
 
     func focus(at devicePoint: CGPoint, lock: Bool) {
@@ -489,7 +420,6 @@ final class CameraController: ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             do {
-                self.promoteToHighestPhotoFormat(device)
                 let newInput = try AVCaptureDeviceInput(device: device)
                 self.session.beginConfiguration()
                 if let videoInput = self.videoInput {
@@ -500,6 +430,8 @@ final class CameraController: ObservableObject {
                     throw CameraError.cannotConfigure
                 }
                 self.session.addInput(newInput)
+                self.promoteToHighestPhotoFormat(device)
+                self.updatePhotoDimensions(for: device)
                 self.session.commitConfiguration()
                 self.videoInput = newInput
                 self.cameraDevice = device
@@ -534,7 +466,7 @@ final class CameraController: ObservableObject {
             }
             guard generation == captureGeneration else { return }
             countdown = nil
-            DispatchQueue.main.async { [weak self] in
+            sessionQueue.async { [weak self] in
                 self?.performCapture(configuration)
             }
         }
@@ -555,7 +487,6 @@ final class CameraController: ObservableObject {
         }
 
         do {
-            promoteToHighestPhotoFormat(device)
             let input = try AVCaptureDeviceInput(device: device)
             session.beginConfiguration()
             var didCommitConfiguration = false
@@ -571,6 +502,7 @@ final class CameraController: ObservableObject {
             }
             session.addInput(input)
             videoInput = input
+            promoteToHighestPhotoFormat(device)
 
             videoOutput.alwaysDiscardsLateVideoFrames = true
             videoOutput.videoSettings = [
@@ -631,6 +563,14 @@ final class CameraController: ObservableObject {
     private func discoverCamera(position: AVCaptureDevice.Position) -> AVCaptureDevice? {
         if position == .back {
             return AVCaptureDevice.default(
+                .builtInTripleCamera,
+                for: .video,
+                position: .back
+            ) ?? AVCaptureDevice.default(
+                .builtInDualWideCamera,
+                for: .video,
+                position: .back
+            ) ?? AVCaptureDevice.default(
                 .builtInWideAngleCamera,
                 for: .video,
                 position: .back
@@ -654,7 +594,10 @@ final class CameraController: ObservableObject {
     ) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.minimumZoom = device.position == .back ? 0.5 : 1
+            let hasUltraWide = device.constituentDevices.contains {
+                $0.deviceType == .builtInUltraWideCamera
+            }
+            self.minimumZoom = device.position == .back && hasUltraWide ? 0.5 : 1
             self.maximumZoom = 8
             self.selectedZoom = device.position == .back ? 1 : min(max(1, self.minimumZoom), self.maximumZoom)
             self.minimumExposureBias = device.minExposureTargetBias
