@@ -387,9 +387,9 @@ final class CameraController: ObservableObject {
         guard let best else { return }
 
         sessionQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self, let device = self.cameraDevice else { return }
             self.session.beginConfiguration()
-            self.updatePhotoDimensions(for: self.cameraDevice)
+            self.updatePhotoDimensions(for: device)
             self.session.commitConfiguration()
             DispatchQueue.main.async {
                 self.maxPhotoDimensions = best
